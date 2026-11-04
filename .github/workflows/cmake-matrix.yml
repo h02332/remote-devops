@@ -429,7 +429,7 @@ jobs:
   #############################################################################
   option-matrix:
     name: "Option • ${{ matrix.option_name }}"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 20
     defaults:
       run:
@@ -532,7 +532,7 @@ jobs:
   #############################################################################
   windows-build:
     name: "Windows • MSVC • ${{ matrix.build_type }}"
-    runs-on: windows-latest
+    runs-on: windows-x64
     timeout-minutes: 30
     env:
       POWERSHELL_TELEMETRY_OPTOUT: "1"
@@ -614,7 +614,7 @@ jobs:
   #############################################################################
   version-header-test:
     name: "Version Headers • Build Directory Generation"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 15
     defaults:
       run:
@@ -698,7 +698,7 @@ jobs:
   #############################################################################
   clean-rebuild-test:
     name: "Clean/Rebuild Cycle Test"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 20
     defaults:
       run:
@@ -803,7 +803,7 @@ jobs:
   #############################################################################
   final-summary:
     name: "Test Summary"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     needs: [standard-builds, sanitizer-builds, option-matrix, windows-build, version-header-test, clean-rebuild-test]
     if: always()
 
