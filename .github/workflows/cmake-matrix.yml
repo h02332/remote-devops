@@ -532,7 +532,7 @@ jobs:
   #############################################################################
   windows-build:
     name: "Windows • MSVC • ${{ matrix.build_type }}"
-    runs-on: windows-x64
+    runs-on: win-x64
     timeout-minutes: 30
     env:
       POWERSHELL_TELEMETRY_OPTOUT: "1"
