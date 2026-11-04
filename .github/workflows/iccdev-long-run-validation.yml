@@ -142,7 +142,7 @@ jobs:
       - name: Build strict LTO configuration
         env:
           BASH_ENV: /dev/null
-          TEST_IMAGE: ghcr.io/internationalcolorconsortium/iccdev-ci-regression:latest
+          TEST_IMAGE: ghcr.io/internationalcolorconsortium/iccdev:latest
         run: |
           set -euo pipefail
           git config --global credential.helper ""
@@ -268,7 +268,7 @@ jobs:
       - name: Build and test in the maintainer regression image
         env:
           BASH_ENV: /dev/null
-          TEST_IMAGE: ghcr.io/internationalcolorconsortium/iccdev-ci-regression:latest
+          TEST_IMAGE: ghcr.io/internationalcolorconsortium/iccdev:latest
         run: |
           set -euo pipefail
           git config --global credential.helper ""
