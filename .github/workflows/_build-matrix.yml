@@ -63,11 +63,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [unix-x64, macos-x64, macos-arm64]
         compiler: [gcc, clang]
         build_type: [Release, Debug, RelWithDebInfo]
         exclude:
-          - os: macos-latest
+          - os: macos-x64
+            compiler: gcc
+          - os: macos-arm64
             compiler: gcc
 
     steps:
@@ -121,9 +123,9 @@ jobs:
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          sudo apt-get update -qq
+          bash .github/scripts/configure-llvm-22.sh
           sudo apt-get install -y \
-            build-essential cmake gcc g++ clang-18 ccache \
+            build-essential cmake gcc g++ clang-22 ccache \
             libpng-dev libxml2-dev libtiff-dev \
             nlohmann-json3-dev
           ccache --zero-stats || true
@@ -138,7 +140,7 @@ jobs:
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          brew install cmake libpng libtiff libxml2 nlohmann-json ccache jpeg-turbo
+          brew install cmake libpng libtiff libxml2 nlohmann-json ccache jpeg-turbo llvm@22
           ccache --zero-stats || true
 
       - name: Clone iccDEV
@@ -189,12 +191,12 @@ jobs:
             echo "CC=gcc" >> "$GITHUB_ENV"
             echo "CXX=g++" >> "$GITHUB_ENV"
           elif [ "$(uname -s)" = "Darwin" ]; then
-            # macOS: use Apple clang (avoids Homebrew libc++ header conflicts)
-            echo "CC=clang" >> "$GITHUB_ENV"
-            echo "CXX=clang++" >> "$GITHUB_ENV"
+            llvm_bin="$(brew --prefix llvm@22)/bin"
+            echo "CC=$llvm_bin/clang" >> "$GITHUB_ENV"
+            echo "CXX=$llvm_bin/clang++" >> "$GITHUB_ENV"
           else
-            echo "CC=clang-18" >> "$GITHUB_ENV"
-            echo "CXX=clang++-18" >> "$GITHUB_ENV"
+            echo "CC=clang-22" >> "$GITHUB_ENV"
+            echo "CXX=clang++-22" >> "$GITHUB_ENV"
           fi
 
       - name: Configure CMake
@@ -370,9 +372,9 @@ jobs:
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          sudo apt-get update -qq
+          bash .github/scripts/configure-llvm-22.sh
           sudo apt-get install -y \
-            build-essential cmake clang-18 llvm-18 \
+            build-essential cmake clang-22 llvm-22 \
             libpng-dev libxml2-dev libtiff-dev nlohmann-json3-dev
 
       - name: Clone iccDEV
@@ -430,7 +432,7 @@ jobs:
               ;;
           esac
 
-          CC=clang-18 CXX=clang++-18 cmake ../Cmake \
+          CC=clang-22 CXX=clang++-22 cmake ../Cmake \
                 -DCMAKE_BUILD_TYPE="$MATRIX_BUILD_TYPE" \
                 $OPTS
 
@@ -531,9 +533,9 @@ jobs:
           git config --add safe.directory "$PWD"
           git config --global credential.helper ""
           unset GITHUB_TOKEN || true
-          sudo apt-get update -qq
+          bash .github/scripts/configure-llvm-22.sh
           sudo apt-get install -y \
-            build-essential cmake clang-18 \
+            build-essential cmake clang-22 \
             libpng-dev libxml2-dev libtiff-dev nlohmann-json3-dev
 
       - name: Clone iccDEV
@@ -602,7 +604,7 @@ jobs:
   #############################################################################
   windows-build:
     name: "Windows - MSVC - ${{ matrix.build_type }}"
-    runs-on: windows-x64
+    runs-on: win-x64
     timeout-minutes: 30
     env:
       POWERSHELL_TELEMETRY_OPTOUT: "1"
@@ -706,7 +708,7 @@ jobs:
   #############################################################################
   version-header-test:
     name: "Version Headers - Build Directory Generation"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 15
     defaults:
       run:
@@ -809,7 +811,7 @@ jobs:
   #############################################################################
   clean-rebuild-test:
     name: "Clean/Rebuild Cycle Test"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 20
     defaults:
       run:
@@ -935,7 +937,7 @@ jobs:
   #############################################################################
   final-summary:
     name: "Test Summary"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     needs: [standard-builds, sanitizer-builds, option-matrix, windows-build, version-header-test, clean-rebuild-test]
     if: always()
 
