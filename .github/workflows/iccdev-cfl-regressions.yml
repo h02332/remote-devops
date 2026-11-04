@@ -51,7 +51,7 @@ concurrency:
 jobs:
   build-and-smoke:
     name: CFL build and focused smoke (${{ matrix.patch_mode }})
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 30
     strategy:
       fail-fast: false
