@@ -29,7 +29,7 @@ on:
 jobs:
   generate-seeds:
     name: Generate ICC-embedded seeds
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 30
     defaults:
       run:
