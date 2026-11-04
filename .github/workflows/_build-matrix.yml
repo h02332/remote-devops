@@ -315,7 +315,7 @@ jobs:
   #############################################################################
   sanitizer-builds:
     name: "Sanitizer - ${{ matrix.sanitizer }} - ${{ matrix.build_type }}"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 25
     defaults:
       run:
@@ -484,7 +484,7 @@ jobs:
   #############################################################################
   option-matrix:
     name: "Option - ${{ matrix.option_name }}"
-    runs-on: ubuntu-latest
+    runs-on: unix-x64
     timeout-minutes: 20
     defaults:
       run:
@@ -602,7 +602,7 @@ jobs:
   #############################################################################
   windows-build:
     name: "Windows - MSVC - ${{ matrix.build_type }}"
-    runs-on: windows-latest
+    runs-on: windows-x64
     timeout-minutes: 30
     env:
       POWERSHELL_TELEMETRY_OPTOUT: "1"
