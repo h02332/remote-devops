@@ -31,7 +31,7 @@ concurrency:
 jobs:
   afl-script-smoke:
     name: AFL script and report smoke
-    runs-on: ubuntu-24.04
+    runs-on: unix-x64
     timeout-minutes: 10
     defaults:
       run:
