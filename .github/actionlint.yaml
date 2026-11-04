@@ -1,3 +1,12 @@
+self-hosted-runner:
+  labels:
+    - unix-x64
+    - win-x64
+    - WinARM
+    - LinuxARM64
+    - macos-arm64
+    - macos-x64
+
 paths:
   .github/workflows/ci-pr-risk-security-analysis.yml:
     ignore:
