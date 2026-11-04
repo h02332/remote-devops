@@ -1,0 +1,172 @@
+---
+name: corpus-management
+description: >
+  Manage fuzzing corpus lifecycle: SSD/scratch setup, fuzzer execution,
+  coverage collection, corpus merge and dedup, and artifact preservation.
+allowed-tools:
+  - bash
+  - read
+  - write
+  - grep
+  - glob
+---
+
+# Corpus Management
+
+## Overview
+
+Manage fuzzing corpus across permanent (`cfl/corpus-*/`) and scratch/SSD
+storage. Covers setup, fuzzing, coverage, merge, dedup, and cleanup.
+
+## Workflow
+
+### 1. Setup Scratch Storage
+
+```bash
+# Optional SSD/scratch root for corpus pruning or long runs.
+SCRATCH=/mnt/fuzz-ssd
+mkdir -p "$SCRATCH"/logs "$SCRATCH"/profraw
+for d in cfl/corpus-*; do rsync -a --ignore-existing "$d/" "$SCRATCH/$(basename "$d")/"; done
+
+# Status check
+for d in cfl/corpus-*/; do
+  name=$(basename "$d" | sed 's/^corpus-//'); count=$(ls "$d" 2>/dev/null | wc -l)
+  printf "%-40s %6d files\n" "$name" "$count"
+done
+```
+
+### 2. Run Fuzzers
+
+```bash
+# All fuzzers (sequential, prevents OOM)
+cd cfl && ./fuzz-local.sh
+
+# Single fuzzer smoke test (60s)
+ASAN_OPTIONS=detect_leaks=0 LLVM_PROFILE_FILE=/dev/null \
+  cfl/bin/icc_dump_fuzzer -max_total_time=60 -timeout=30 \
+  -rss_limit_mb=4096 cfl/corpus-icc_dump_fuzzer/
+```
+
+Special flags: `icc_link_fuzzer` needs `quarantine_size_mb=256`.
+
+`fuzz-local.sh` copies the pure ICC fixtures from `cfl/seeds-applynamedcmm/`
+into the NamedCmm runtime corpus before executing that target. Never fuzz the
+tracked seed directory in place, and never prepend harness controls to those
+profiles.
+If `ICS-POC/` is available, the same installer copies the five package `ICC/`
+directories with package-prefixed names. Override discovery with
+`CFL_ICS_POC_ROOT`; do not copy package TIFF, PNG, XML, or data files into the
+pure-profile corpus.
+
+For the aligned NamedCmm, Connect, config, and JSON/XML conversion lanes, keep
+`max_len = 0`; the CFL runners derive the explicit runtime limit from the
+largest corpus file. Put representative large inputs in the corpus instead of
+adding a fixed size ceiling. Bound resource use with the existing RSS and
+per-input timeout settings.
+
+Install the schema-shaped
+`docs/Testing/json-configs/connect-config-complete.json` directly into the CFL
+config corpus as ordinary JSON; do not prepend a selector byte. The three AFL
+`-cfg` lanes share that fixture and `cfl/icc_cfg.dict`, but continue to
+screen it through their real tools from isolated work directories. Connect
+profile controls belong only after the profile's declared ICC payload.
+
+### 3. Collect Coverage
+
+```bash
+# Clear stale profraw (invalidated by rebuild)
+find . /mnt/fuzz-ssd -name '*.profraw' -type f -delete
+
+# Merge and report
+llvm-profdata-18 merge -sparse /path/profraw/*.profraw -o merged.profdata
+OBJS=$(printf ' -object %s' cfl/bin/icc_*_fuzzer)
+llvm-cov-18 report $OBJS -instr-profile=merged.profdata
+```
+
+### 4. Preserve Artifacts
+
+Copy crash/oom/timeout files BEFORE cleaning storage:
+```bash
+rsync -a --ignore-existing cfl/runs/*/artifacts/crash-* ./ 2>/dev/null
+rsync -a --ignore-existing cfl/runs/*/artifacts/timeout-* ./test-profiles/cwe-400/ 2>/dev/null
+```
+
+### 5. Corpus Merge (Tournament Bracket)
+
+LibFuzzer `-merge=1` is single-threaded. For large corpora, use parallel merge:
+
+```bash
+# Small corpora (<500 files): 11 parallel merges
+ASAN_OPTIONS=detect_leaks=0 LLVM_PROFILE_FILE=/dev/null
+for name in applynamedcmm applyprofiles dump fromcube fromxml link roundtrip specsep tiffdump toxml v5dspobs; do
+  mkdir -p /tmp/merge/${name}
+  taskset -c $((RANDOM % $(nproc))) \
+    cfl/bin/icc_${name}_fuzzer -merge=1 -timeout=10 -rss_limit_mb=2048 \
+    /tmp/merge/${name} cfl/corpus-icc_${name}_fuzzer/ &
+done
+wait
+```
+
+For 1K+ file corpora, use tournament bracket (split into N=nproc chunks,
+merge each on its own core, pair results 16->8->4->2->1).
+
+### 6. Verify and Swap
+
+Compare file counts (local must be >= source) before swapping directories.
+
+## Key Rules
+
+- After rebuilding fuzzers, ALL old profraw is invalid (binary hash mismatch)
+- Use `${fuzzer_name}_%m_%p.profraw` naming (not just `%m.profraw`)
+- ALL batch operations MUST use all available CPU cores
+- Use existing `.github/scripts/corpus-merge.sh` -- do NOT create custom scripts
+- Only corpus dirs matching `cfl/fuzzers.sh` are runnable; `corpus-xml` is a staging area
+- AFL `jpegdump` and `jpegdump-inject` seed only up to 200 `.jpg`/`.jpeg` files
+  from `fuzz/graphics/jpg` with extractable embedded ICC profiles; never seed
+  those lanes with raw `.icc` files.
+- AFL `applyprofiles-hybrid-embedded` keeps the complete generated multispectral
+  TIFF. Install the pinned large-input runtime with `./afl/build-afl-runtime.sh` and
+  run `.github/scripts/validate-afl-target-configs.sh --local`; do not crop the
+  seed to fit an older AFL++ runtime.
+- AFL ProfilePlot lanes share the durable
+  `test-profiles/sRGB_v4_ICC_preference.icc` fixture. Graph seeds must retain
+  `chroma:xy`; raster seeds must retain `clut:A2B0`. Screen both with exit zero
+  and validate the raw-output path with
+  `.github/scripts/validate-afl-profileplot-targets.sh --replay`.
+- AFL inputs, queues, and findings are separate: seeds live in `input/`, while a
+  single AFL instance writes `output/default/queue` and parallel instances write
+  `output/main/queue` plus `output/secondary_N/queue`. Do not copy XML sidecars
+  into a queue or crashes directory.
+- Replay `fromxml-includes` from its staged support working directory. Use the
+  AFL triage/map/minimize helpers so relative TXT/XML includes resolve. JSON
+  `-cfg` lanes must use their isolated `afl/work/<target>/root` directory so
+  fuzzed output names cannot litter the repository root.
+- `applyprofiles-hybrid-pcc` has one known-compatible PCC seed and a slow full
+  transform. Keep its focused seed set and measured timeout; broad corpus
+  screening can look like a hung startup before AFL creates stats.
+- `applynamedcmm-hybrid-pcc` fuzzes only V5 ICC profiles in its PCC position,
+  always stages the generated D50 PCC profile, and may discover the five ICS
+  package `ICC/` directories through `AFL_ICS_POC_ROOT`. Do not admit XML or
+  generated TIFF files to this lane; inventory those sources separately and
+  send media only to a matching media target.
+- `applynamedcmm-v5-brdf` uses
+  `extended-test-profiles/tag-checks/dtob-brdf.icc` with selector `10063`.
+  Keep `applynamedcmm-hybrid-chain` on explicit spectral selector `10103` so
+  BRDF-direct and spectral V5 coverage do not collapse into the same lane.
+- The ordinary `applynamedcmm` lane always stages its known sRGB profile and
+  requires directory candidates to complete its fixed RGB intent-3 transform
+  with exit 0. The validated explicit bootstrap bypasses runtime corpus
+  screening; keep soft-failing directory profiles in parser lanes instead of
+  counting them as apply coverage.
+- `applyprofiles-hybrid-embedded` must retain the full multispectral TIFF but
+  skip enhanced deterministic inference, use fast calibration, and enable
+  expanded havoc immediately. The inference stage can display `zzzz...` for
+  minutes on this multi-megabyte structured seed without useful mutation work.
+- On repeated correction or wrap-up requests, skip broad corpus sweeps. Make
+  the named fix, run the narrow seed validator or seed-only check, then commit
+  and push if requested.
+
+## References
+
+- `.github/prompts/fuzzer-optimization.prompt.md` -- Coverage strategies
+- `.github/instructions/cfl.instructions.md` -- Fuzzer details

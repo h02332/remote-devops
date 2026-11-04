@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# Validate every registered AFL target configuration without launching fuzzers.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=afl/targets.sh
+source "$REPO_ROOT/afl/targets.sh"
+# shellcheck source=afl/sanitizer-env.sh
+source "$REPO_ROOT/afl/sanitizer-env.sh"
+
+LOCAL_AUDIT=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --local)
+            LOCAL_AUDIT=1
+            shift
+            ;;
+        --sanitizer)
+            if [[ $# -lt 2 || "$2" == --* ]]; then
+                echo "ERROR: --sanitizer requires address, memory, or thread" >&2
+                exit 1
+            fi
+            AFL_SANITIZER="$2"
+            shift 2
+            ;;
+        *)
+            echo "Usage: $0 [--local] [--sanitizer MODE]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+scratch_root="$(mktemp -d /tmp/afl-target-contracts-XXXXXX)"
+trap 'rm -rf -- "$scratch_root"' EXIT
+
+AFL_BASE="$scratch_root/afl"
+BIN_DIR="$(afl_default_bin_dir "$REPO_ROOT/afl/bin")" || {
+    echo "ERROR: unsupported AFL sanitizer '${AFL_SANITIZER:-unknown}' (use address, memory, or thread)" >&2
+    exit 1
+}
+if [[ "$LOCAL_AUDIT" -eq 1 ]]; then
+    afl_export_triage_sanitizer_env "$BIN_DIR"
+fi
+errors=0
+declare -A configured_dirs=()
+
+fail() {
+    echo "ERROR: $*" >&2
+    errors=$((errors + 1))
+}
+
+expect_value() {
+    local label="$1"
+    local actual="$2"
+    local expected="$3"
+
+    if [[ "$actual" != "$expected" ]]; then
+        fail "$label: expected '$expected', got '$actual'"
+    fi
+}
+
+expect_arg() {
+    local target="$1"
+    local index="$2"
+    local expected="$3"
+
+    expect_value "$target argv[$index]" "${AFL_ARGS[$index]:-}" "$expected"
+}
+
+check_apply_argc() {
+    local target="$1"
+    local expected="$2"
+
+    afl_configure_target "$target"
+    expect_value "$target argc" "${#AFL_ARGS[@]}" "$expected"
+}
+
+for target in "${AFL_TARGETS[@]}"; do
+    if ! afl_configure_target "$target"; then
+        fail "$target did not configure"
+        continue
+    fi
+    if [[ -z "$BINARY" || -z "$AFL_DIR" || -z "$AFL_WORK_DIR" ]]; then
+        fail "$target left a required path empty"
+    fi
+    if [[ "$(basename "$BINARY")" == iccApply* ||
+          "$(basename "$BINARY")" == "iccBenchApply" ]]; then
+        testcase_args=0
+        for configured_arg in "${AFL_ARGS[@]}"; do
+            if [[ "$configured_arg" == "@@" ]]; then
+                testcase_args=$((testcase_args + 1))
+            fi
+        done
+        if [[ "${#AFL_ARGS[@]}" -eq 0 ]]; then
+            fail "$target has no argv in $AFL_ICCAPPLY_ARGS_CONFIG"
+        elif [[ "$testcase_args" -ne 1 ]]; then
+            fail "$target must have exactly one @@ argument in $AFL_ICCAPPLY_ARGS_CONFIG"
+        fi
+    fi
+    if [[ ! "$SEED_MAX_BYTES" =~ ^[0-9]+$ ||
+          ! "$SEED_LIMIT" =~ ^[0-9]+$ ||
+          ! "$SEED_FIND_MAXDEPTH" =~ ^[0-9]+$ ||
+          ! "$SEED_DRY_RUN_TIMEOUT" =~ ^[0-9]+$ ||
+          ! "$AFL_TARGET_TIMEOUT" =~ ^[0-9]+$ ]]; then
+        fail "$target has a non-numeric seed or timeout policy"
+    fi
+    if [[ -n "${configured_dirs[$AFL_DIR]:-}" ]]; then
+        fail "$target shares AFL_DIR with ${configured_dirs[$AFL_DIR]}: $AFL_DIR"
+    else
+        configured_dirs[$AFL_DIR]="$target"
+    fi
+    if [[ "$LOCAL_AUDIT" -eq 1 ]]; then
+        support_log="$scratch_root/support-${target//[^[:alnum:]_-]/_}.log"
+        existing_seed_dirs=0
+        if [[ ! -x "$BINARY" ]]; then
+            fail "$target binary is missing or not executable: $BINARY"
+        fi
+        if ! afl_prepare_target_support_files "$target" >"$support_log" 2>&1; then
+            sed 's/^/  /' "$support_log" >&2
+            fail "$target support preparation failed"
+            continue
+        fi
+        if [[ -n "$DICT" && ! -f "$DICT" ]]; then
+            fail "$target dictionary is missing: $DICT"
+        fi
+        for configured_path in "${REQUIRED_FILES[@]}" "${SEED_FILES[@]}"; do
+            if [[ ! -e "$configured_path" ]]; then
+                fail "$target configured file is missing: $configured_path"
+            fi
+        done
+        for configured_path in "${SEED_DIRS[@]}"; do
+            if [[ -d "$configured_path" ]]; then
+                existing_seed_dirs=$((existing_seed_dirs + 1))
+            fi
+        done
+        if [[ "${#SEED_DIRS[@]}" -gt 0 && "$existing_seed_dirs" -eq 0 ]]; then
+            fail "$target has no available configured seed directory"
+        fi
+    fi
+done
+
+check_apply_argc benchapply 7
+check_apply_argc applynamedcmm 5
+check_apply_argc applynamedcmm-v5-brdf 5
+check_apply_argc applynamedcmm-debugcalc 6
+check_apply_argc applynamedcmm-cfg 2
+check_apply_argc applynamedcmm-hybrid-chain 9
+check_apply_argc applynamedcmm-hybrid-pcc 17
+check_apply_argc applyprofiles 9
+check_apply_argc applyprofiles-fast 9
+check_apply_argc applyprofiles-deep 9
+check_apply_argc applyprofiles-cfg 4
+check_apply_argc applyprofiles-search 4
+check_apply_argc applyprofiles-hybrid-embedded 13
+check_apply_argc applyprofiles-hybrid-pcc 15
+check_apply_argc applyprofiles-row 11
+check_apply_argc applysearch 11
+check_apply_argc applysearch-noinit 7
+check_apply_argc applysearch-cfg 2
+check_apply_argc applysearch-fast 11
+check_apply_argc applysearch-hybrid-pcc 21
+check_apply_argc applysearch-weight-positive 11
+check_apply_argc applysearch-weight-positive-fast 11
+check_apply_argc applysearch-weight-zero 11
+check_apply_argc applysearch-weight-negative 11
+check_apply_argc applysearch-weight-nan 11
+check_apply_argc applytolink 13
+check_apply_argc applytolink-v5 13
+check_apply_argc applytolink-cube 11
+
+if ! grep -Fqx "export AFL_TESTCACHE_SIZE=\"\$AFL_TESTCACHE_SIZE_VAL\"" "$REPO_ROOT/afl/start.sh"; then
+    fail "start.sh must export a zero test-cache value so AFL++ disables the cache"
+fi
+
+for target in applynamedcmm-cfg applyprofiles-cfg applyprofiles-search applysearch-cfg; do
+    if ! afl_target_is_qa_only "$target"; then
+        fail "$target is not classified as bounded QA"
+    fi
+done
+for target in fromjson fromjson-noid applyprofiles applysearch heifdump; do
+    if afl_target_is_qa_only "$target"; then
+        fail "$target must remain in the continuous target set"
+    fi
+done
+
+afl_configure_target benchapply
+expect_value "BenchApply binary" "$(basename "$BINARY")" "iccBenchApply"
+expect_value "BenchApply argv count" "${#AFL_ARGS[@]}" "7"
+expect_value "BenchApply fuzzed profile argument" "${AFL_ARGS[5]}" "@@"
+expect_value "BenchApply BPC and luminance intent" "${AFL_ARGS[6]}" "140"
+expect_value "BenchApply exit-zero dry run" "$SEED_DRY_RUN_REQUIRE_ZERO_TARGET" "1"
+
+afl_configure_target applynamedcmm
+expect_arg applynamedcmm 1 "6"
+expect_arg applynamedcmm 2 "0"
+expect_arg applynamedcmm 3 "@@"
+expect_arg applynamedcmm 4 "0"
+
+afl_configure_target applynamedcmm-v5-brdf
+expect_arg applynamedcmm-v5-brdf 1 "6"
+expect_arg applynamedcmm-v5-brdf 2 "1"
+expect_arg applynamedcmm-v5-brdf 4 "10063"
+expect_value "V5 BRDF seed" "${SEED_FILES[0]}" "$REPO_ROOT/extended-test-profiles/tag-checks/dtob-brdf.icc"
+
+afl_configure_target applynamedcmm-debugcalc
+expect_value "debugcalc bootstrap seed" "${SEED_FILES[0]}" "$REPO_ROOT/test-profiles/argbCalc.icc"
+expect_value "debugcalc AFL timeout" "$AFL_TARGET_TIMEOUT" "1000"
+
+afl_configure_target applynamedcmm-hybrid-chain
+expect_arg applynamedcmm-hybrid-chain 6 "10103"
+expect_value "spectral chain bootstrap seed" "${SEED_FILES[0]}" "$HYBRID_SPEC_D50"
+
+afl_configure_target applyprofiles-deep
+expect_arg applyprofiles-deep 2 "2"
+expect_arg applyprofiles-deep 3 "1"
+expect_arg applyprofiles-deep 4 "0"
+expect_arg applyprofiles-deep 5 "1"
+expect_arg applyprofiles-deep 6 "1"
+expect_arg applyprofiles-deep 8 "12"
+
+afl_configure_target applysearch-noinit
+expect_value "no-init bootstrap seed" "${SEED_FILES[0]}" "$REPO_ROOT/test-profiles/sRGB_v4_ICC_preference.icc"
+
+afl_configure_target applysearch-fast
+expect_arg applysearch-fast 1 "4"
+expect_arg applysearch-fast 2 "0"
+
+for target in applysearch-weight-positive applysearch-weight-zero applysearch-weight-negative applysearch-weight-nan; do
+    afl_configure_target "$target"
+    expect_arg "$target" 0 "$REPO_ROOT/docs/Testing/test-data/rgb-8bit.txt"
+done
+
+afl_configure_target applytolink-v5
+expect_value "ApplyToLink V5 bootstrap seed" "${SEED_FILES[0]}" "$REPO_ROOT/test-profiles/sRGB_v4_ICC_preference.icc"
+
+afl_configure_target fromjson
+expect_value "FromJson text input mode" "$AFL_INPUT_FORMAT" "text"
+expect_value "FromJson maximum length" "$AFL_MAX_LENGTH" "262144"
+expect_arg fromjson 0 "@@"
+
+afl_configure_target fromjson-noid
+expect_arg fromjson-noid 0 "@@"
+expect_arg fromjson-noid 2 "-noid"
+expect_value "FromJson no-id target directory" "$AFL_DIR" "$AFL_BASE/afl-fromjson-noid"
+
+afl_configure_target heifdump
+expect_value "HEIF carrier maximum seed bytes" "$SEED_MAX_BYTES" "5242880"
+expect_value "HEIF carrier maximum mutation length" "$AFL_MAX_LENGTH" "5242880"
+expect_value "HEIF carrier trimming policy" "$AFL_DISABLE_TRIM_TARGET" "1"
+expect_value "HEIF carrier deterministic policy" "$AFL_SKIP_DETERMINISTIC_TARGET" "1"
+expect_value "HEIF carrier non-zero seed policy" "$SEED_DRY_RUN_REQUIRE_ZERO_TARGET" "0"
+expect_value "HEIF coverage seed directory" "${SEED_DIRS[2]}" "$AFL_BASE/support/heif-coverage"
+
+AFL_MAX_LENGTH_EXPLICIT=1
+AFL_MAX_LENGTH=67108864
+afl_configure_target heifdump
+expect_value "HEIF carrier maximum-length override" "$AFL_MAX_LENGTH" "67108864"
+AFL_MAX_LENGTH_EXPLICIT=0
+AFL_MAX_LENGTH=""
+
+afl_configure_target heifdump-extract
+expect_value "HEIF extraction wrapper" "$BINARY" "$REPO_ROOT/afl/heifdump-extract-wrapper.sh"
+expect_arg heifdump-extract 0 "@@"
+expect_arg heifdump-extract 1 "$BIN_DIR/iccHeifDump"
+expect_value "HEIF extraction no-forkserver policy" "$AFL_NO_FORKSRV_TARGET" "1"
+expect_value "HEIF extraction instrumented child" "$AFL_INSTRUMENTED_BINARY" "$BIN_DIR/iccHeifDump"
+expect_value "HEIF extraction exit-zero seed policy" "$SEED_DRY_RUN_REQUIRE_ZERO_TARGET" "1"
+expect_value "HEIF extraction trimming policy" "$AFL_DISABLE_TRIM_TARGET" "1"
+expect_value "HEIF extraction deterministic policy" "$AFL_SKIP_DETERMINISTIC_TARGET" "1"
+
+mkdir -p "$scratch_root/heif-a" "$scratch_root/heif-b"
+ICCDEV_HEIF_SEED_DIRS="$scratch_root/heif-a:$scratch_root/heif-b"
+afl_configure_target heifdump
+expect_value "first external HEIF seed directory" "${SEED_DIRS[3]}" "$scratch_root/heif-a"
+expect_value "second external HEIF seed directory" "${SEED_DIRS[4]}" "$scratch_root/heif-b"
+unset ICCDEV_HEIF_SEED_DIRS
+
+afl_configure_target specseptotiff
+expect_value "SpecSep default argc" "${#AFL_ARGS[@]}" "8"
+expect_arg specseptotiff 4 "1"
+expect_arg specseptotiff 5 "9"
+expect_arg specseptotiff 6 "1"
+expect_arg specseptotiff 7 "@@"
+expect_value "SpecSep default bootstrap" "${SEED_FILES[0]}" "$REPO_ROOT/fuzz/graphics/icc/Turquoise-Magenta-Yellow-Violet-Green-Blue-Orange-BlueGreen-PinkViolet_output.icc"
+expect_value "SpecSep default exit-zero seed policy" "$SEED_DRY_RUN_REQUIRE_ZERO_TARGET" "1"
+
+afl_configure_target specseptotiff-compress
+expect_value "SpecSep compressed argc" "${#AFL_ARGS[@]}" "8"
+expect_arg specseptotiff-compress 1 "1"
+expect_arg specseptotiff-compress 2 "0"
+expect_arg specseptotiff-compress 4 "1"
+expect_arg specseptotiff-compress 5 "3"
+expect_value "SpecSep compressed bootstrap" "${SEED_FILES[0]}" "$REPO_ROOT/test-profiles/sRGB_v4_ICC_preference.icc"
+
+afl_configure_target specseptotiff-desc
+expect_arg specseptotiff-desc 4 "3"
+expect_arg specseptotiff-desc 5 "1"
+expect_arg specseptotiff-desc 6 "-1"
+
+afl_configure_target specseptotiff-harvest
+expect_arg specseptotiff-harvest 4 "1"
+expect_arg specseptotiff-harvest 5 "8"
+expect_value "SpecSep harvest bootstrap" "${SEED_FILES[0]}" "$REPO_ROOT/fuzz/graphics/icc/Turquoise-Magenta-Yellow-Violet-Green-Blue-Orange-BlueGreen_output.icc"
+expect_value "SpecSep harvest maximum length" "$AFL_MAX_LENGTH" "2097152"
+
+afl_configure_target specseptotiff-short
+expect_arg specseptotiff-short 4 "1"
+expect_arg specseptotiff-short 5 "3"
+expect_value "SpecSep short bootstrap" "${SEED_FILES[0]}" "$REPO_ROOT/test-profiles/sRGB_v4_ICC_preference.icc"
+
+afl_configure_target specseptotiff-sep
+expect_arg specseptotiff-sep 1 "0"
+expect_arg specseptotiff-sep 2 "1"
+expect_arg specseptotiff-sep 5 "3"
+
+afl_configure_target specseptotiff-tiles
+expect_value "SpecSep tiled argc" "${#AFL_ARGS[@]}" "11"
+expect_arg specseptotiff-tiles 0 "--tiles"
+expect_arg specseptotiff-tiles 1 "16"
+expect_arg specseptotiff-tiles 2 "16"
+expect_value "SpecSep tiled staged prefix" "${AFL_ARGS[6]}" "$SPECSEP_STAGED_PREFIX"
+expect_arg specseptotiff-tiles 8 "3"
+expect_arg specseptotiff-tiles 10 "@@"
+
+afl_configure_target specseptotiff-bigtiff
+expect_value "SpecSep BigTIFF argc" "${#AFL_ARGS[@]}" "9"
+expect_arg specseptotiff-bigtiff 0 "--bigtiff"
+expect_value "SpecSep BigTIFF staged prefix" "${AFL_ARGS[4]}" "$SPECSEP_STAGED_PREFIX"
+expect_arg specseptotiff-bigtiff 6 "3"
+expect_arg specseptotiff-bigtiff 8 "@@"
+
+afl_configure_target specseptotiff-tiff
+expect_value "SpecSep TIFF wrapper" "$BINARY" "$REPO_ROOT/afl/specsep-tiff-wrapper.sh"
+expect_value "SpecSep TIFF argc" "${#AFL_ARGS[@]}" "1"
+expect_arg specseptotiff-tiff 0 "@@"
+expect_value "SpecSep TIFF no-forkserver policy" "$AFL_NO_FORKSRV_TARGET" "1"
+expect_value "SpecSep TIFF exit-zero seed policy" "$SEED_DRY_RUN_REQUIRE_ZERO_TARGET" "1"
+
+afl_configure_target tiffdump-ifd
+expect_arg tiffdump-ifd 0 "--ifd"
+expect_arg tiffdump-ifd 1 "1"
+expect_arg tiffdump-ifd 2 "@@"
+expect_value "TIFF IFD bootstrap seed" "${SEED_FILES[0]}" "$REPO_ROOT/test-profiles/tiff-codecs/seed-tiff-multi-ifd-3pages.tif"
+expect_value "TIFF IFD trimming policy" "$AFL_DISABLE_TRIM_TARGET" "1"
+expect_value "TIFF IFD fast calibration" "$AFL_FAST_CAL_TARGET" "1"
+expect_value "TIFF IFD expanded havoc" "$AFL_EXPAND_HAVOC_TARGET" "1"
+expect_value "TIFF IFD deterministic policy" "$AFL_SKIP_DETERMINISTIC_TARGET" "1"
+
+afl_configure_target tiffdump-list
+expect_arg tiffdump-list 0 "--list-directories"
+expect_arg tiffdump-list 1 "@@"
+expect_value "TIFF list bootstrap seed" "${SEED_FILES[0]}" "$REPO_ROOT/test-profiles/tiff-codecs/seed-tiff-multi-ifd-3pages.tif"
+expect_value "TIFF list first seed directory" "${SEED_DIRS[0]}" "$REPO_ROOT/test-profiles/tiff-codecs"
+expect_value "TIFF list second seed directory" "${SEED_DIRS[1]}" "$REPO_ROOT/fuzz/graphics/tif"
+expect_value "TIFF list seed directory count" "${#SEED_DIRS[@]}" "2"
+expect_value "TIFF list per-directory seed limit" "$SEED_LIMIT" "32"
+expect_value "TIFF list maximum seed bytes" "$SEED_MAX_BYTES" "1048576"
+expect_value "TIFF list trimming policy" "$AFL_DISABLE_TRIM_TARGET" "0"
+expect_value "TIFF list fast calibration" "$AFL_FAST_CAL_TARGET" "1"
+expect_value "TIFF list expanded havoc" "$AFL_EXPAND_HAVOC_TARGET" "1"
+expect_value "TIFF list deterministic policy" "$AFL_SKIP_DETERMINISTIC_TARGET" "1"
+
+for target in tiffdump tiffdump-extract; do
+    afl_configure_target "$target"
+    expect_value "$target trimming policy" "$AFL_DISABLE_TRIM_TARGET" "1"
+    expect_value "$target fast calibration" "$AFL_FAST_CAL_TARGET" "1"
+    expect_value "$target expanded havoc" "$AFL_EXPAND_HAVOC_TARGET" "1"
+    expect_value "$target deterministic policy" "$AFL_SKIP_DETERMINISTIC_TARGET" "1"
+done
+
+afl_configure_target pawgreport
+expect_value "PawgReport trimming disabled" "$AFL_DISABLE_TRIM_TARGET" "1"
+expect_value "PawgReport full calibration" "$AFL_FAST_CAL_TARGET" "0"
+expect_arg pawgreport 0 "--json"
+expect_arg pawgreport 1 "@@"
+
+afl_configure_target pawgreport-fast
+expect_value "fast PawgReport trimming disabled" "$AFL_DISABLE_TRIM_TARGET" "1"
+expect_value "fast PawgReport fast calibration" "$AFL_FAST_CAL_TARGET" "1"
+
+AFL_MAX_LENGTH=""
+afl_configure_target applyprofiles-hybrid-embedded
+expect_value "hybrid embedded seed count" "${#SEED_FILES[@]}" "1"
+expect_value "hybrid embedded full-size seed" "${SEED_FILES[0]}" "$HYBRID_MS_TIFF"
+expect_value "hybrid embedded seed ceiling" "$SEED_MAX_BYTES" "0"
+expect_value "hybrid embedded generator ceiling" "$AFL_MAX_LENGTH" ""
+expect_value "hybrid embedded dry-run timeout" "$SEED_DRY_RUN_TIMEOUT" "120"
+expect_value "hybrid embedded AFL timeout" "$AFL_TARGET_TIMEOUT" "120000"
+expect_value "hybrid embedded exit-zero dry run" "$SEED_DRY_RUN_REQUIRE_ZERO_TARGET" "1"
+expect_value "hybrid embedded fast calibration" "$AFL_FAST_CAL_TARGET" "1"
+expect_value "hybrid embedded expanded havoc" "$AFL_EXPAND_HAVOC_TARGET" "1"
+expect_value "hybrid embedded deterministic skip" "$AFL_SKIP_DETERMINISTIC_TARGET" "1"
+
+for target in applynamedcmm-cfg applyprofiles-cfg applysearch-cfg; do
+    afl_configure_target "$target"
+    expect_value "$target isolated work flag" "$ISOLATED_WORK_NEEDS_SUPPORT" "1"
+    expect_value "$target config dictionary" "$DICT" "$REPO_ROOT/cfl/icc_cfg.dict"
+    if [[ "$SEED_INCLUDE_REGEX" != *"connect-config-complete"* ]]; then
+        fail "$target does not admit the complete IccConnect configuration seed"
+    fi
+    if [[ "$AFL_WORK_DIR" != "$AFL_BASE/work/"*"/root" ]]; then
+        fail "$target work directory is not isolated under AFL_BASE/work: $AFL_WORK_DIR"
+    fi
+    if [[ "$AFL_WORK_DIR" == "$REPO_ROOT" ]]; then
+        fail "$target must not run config-controlled outputs from the repository root"
+    fi
+done
+
+afl_configure_target applyprofiles-search
+expect_arg applyprofiles-search 0 "-threads"
+expect_arg applyprofiles-search 1 "1"
+expect_arg applyprofiles-search 2 "-cfg"
+expect_arg applyprofiles-search 3 "@@"
+expect_value "ApplyProfiles search seed" "${SEED_FILES[0]}" "$REPO_ROOT/afl/applyprofiles-search.json"
+expect_value "ApplyProfiles search hybrid support" "$HYBRID_NEEDS_SUPPORT" "1"
+expect_value "ApplyProfiles search source" "$HYBRID_SEARCH_TIFF" "$HYBRID_DATA_DIR/afl-search-source.tif"
+expect_value "ApplyProfiles search exit-zero dry run" "$SEED_DRY_RUN_REQUIRE_ZERO_TARGET" "1"
+expect_value "ApplyProfiles search dry-run timeout" "$SEED_DRY_RUN_TIMEOUT" "30"
+expect_value "ApplyProfiles search AFL timeout" "$AFL_TARGET_TIMEOUT" "30000"
+expect_value "ApplyProfiles search expanded havoc" "$AFL_EXPAND_HAVOC_TARGET" "1"
+expect_value "ApplyProfiles search deterministic skip" "$AFL_SKIP_DETERMINISTIC_TARGET" "1"
+
+afl_configure_target applyprofiles-hybrid-pcc
+expect_value "hybrid PCC seed file count" "${#SEED_FILES[@]}" "1"
+expect_value "hybrid PCC compatible seed" "${SEED_FILES[0]}" "$HYBRID_ICC_DIR/MultSpectralRGB.icc"
+expect_value "hybrid PCC seed directory count" "${#SEED_DIRS[@]}" "0"
+expect_value "hybrid PCC dry-run timeout" "$SEED_DRY_RUN_TIMEOUT" "30"
+expect_value "hybrid PCC AFL timeout" "$AFL_TARGET_TIMEOUT" "30000"
+if [[ "${AFL_ARGS[1]}" != *"${AFL_TMP_PREFIX}"* ]]; then
+    fail "hybrid PCC export config path is not process-specific: ${AFL_ARGS[1]}"
+fi
+
+if grep -q 'MS_smCows_64x64' "$REPO_ROOT/afl/targets.sh"; then
+    fail "cropped hybrid seed path remains in afl/targets.sh"
+fi
+
+if [[ "$errors" -ne 0 ]]; then
+    echo "AFL target configuration validation failed with $errors error(s)." >&2
+    exit 1
+fi
+
+if [[ "$LOCAL_AUDIT" -eq 1 ]]; then
+    echo "AFL local target and asset validation passed: ${#AFL_TARGETS[@]} targets."
+else
+    echo "AFL target configuration validation passed: ${#AFL_TARGETS[@]} targets."
+fi

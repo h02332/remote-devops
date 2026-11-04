@@ -1,0 +1,5 @@
+# CODEOWNERS -- require review for security-sensitive paths
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Workflow governance -- all CI changes require owner review
+.github/workflows/ @xsscx @colourbill-ctrl @ChrisCoxArt

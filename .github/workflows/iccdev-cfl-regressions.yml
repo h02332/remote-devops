@@ -1,0 +1,225 @@
+###############################################################
+# Copyright (c) 2026 International Color Consortium.
+#                All rights reserved.
+#                https://color.org
+#
+# Intent: Build and smoke the research CFL harness inventory.
+###############################################################
+
+name: iccDEV CFL Regressions
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/instructions/cfl.instructions.md'
+      - '.github/scripts/generate-cfl-specsep-seeds.py'
+      - '.github/scripts/generate-heif-coverage-seeds.py'
+      - '.github/scripts/check-afl-cfl-patches.sh'
+      - '.github/scripts/unbundle-fuzzer-input.sh'
+      - '.github/scripts/validate-cfl-applynamedcmm.sh'
+      - '.github/workflows/iccdev-cfl-regressions.yml'
+      - 'afl/third_party/**'
+      - 'cfl/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/instructions/cfl.instructions.md'
+      - '.github/scripts/generate-cfl-specsep-seeds.py'
+      - '.github/scripts/generate-heif-coverage-seeds.py'
+      - '.github/scripts/check-afl-cfl-patches.sh'
+      - '.github/scripts/unbundle-fuzzer-input.sh'
+      - '.github/scripts/validate-cfl-applynamedcmm.sh'
+      - '.github/workflows/iccdev-cfl-regressions.yml'
+      - 'afl/third_party/**'
+      - 'cfl/**'
+  workflow_dispatch:
+    inputs:
+      iccdev_ref:
+        description: 'Upstream iccDEV branch, tag, or commit'
+        required: false
+        default: 'master'
+        type: string
+
+concurrency:
+  group: iccdev-cfl-regressions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    name: CFL build and focused smoke (${{ matrix.patch_mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        patch_mode: [baseline, optional-stack]
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+    env:
+      BASH_ENV: /dev/null
+      ICCDEV_REF: ${{ inputs.iccdev_ref || 'master' }}
+      PATCH_MODE: ${{ matrix.patch_mode }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            clang \
+            cmake \
+            libclang-rt-dev \
+            libjpeg-dev \
+            libpng-dev \
+            libssl-dev \
+            libtiff-dev \
+            libxml2-dev \
+            nlohmann-json3-dev \
+            pkg-config \
+            shellcheck
+
+      - name: Validate CFL metadata and scripts
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          shellcheck afl/third_party/build.sh \
+            cfl/build.sh cfl/fuzzers.sh cfl/fuzz-local.sh cfl/start.sh \
+            .github/scripts/check-afl-cfl-patches.sh \
+            cfl/test-msan-dependencies.sh cfl/third_party/build-msan-libcxx.sh \
+            cfl/third_party/build-msan-libxml2.sh \
+            .github/scripts/unbundle-fuzzer-input.sh \
+            .github/scripts/validate-cfl-applynamedcmm.sh
+          bash -n afl/third_party/build.sh \
+            cfl/build.sh cfl/fuzzers.sh cfl/fuzz-local.sh cfl/start.sh \
+            .github/scripts/check-afl-cfl-patches.sh \
+            cfl/test-msan-dependencies.sh cfl/third_party/build-msan-libcxx.sh \
+            cfl/third_party/build-msan-libxml2.sh \
+            .github/scripts/unbundle-fuzzer-input.sh \
+            .github/scripts/validate-cfl-applynamedcmm.sh
+          grep -Fq -- '-DAVOID_FUZZER_FALSE_POSITIVE=1' \
+            afl/third_party/build.sh
+          grep -Fq '3d840e17858de03a09fba8b202e3a89267d5795a' \
+            cfl/third_party/build-msan-libxml2.sh
+          grep -Fq 'test-msan-dependencies.sh' cfl/build.sh
+          source cfl/fuzzers.sh
+          test "$(cfl_list_fuzzers | wc -l)" -eq "${#CFL_FUZZERS[@]}"
+          test "${#CFL_FUZZERS[@]}" -gt 0
+          continuous_fuzzers="$(cfl_list_continuous_fuzzers)"
+          qa_fuzzers="$(cfl_list_qa_fuzzers)"
+          if grep -Fxq icc_cfg_fuzzer <<< "$continuous_fuzzers"; then
+            echo "icc_cfg_fuzzer must remain outside continuous fuzzing" >&2
+            exit 1
+          fi
+          grep -Fxq icc_cfg_fuzzer <<< "$qa_fuzzers"
+          grep -Fxq icc_fromjson_fuzzer <<< "$continuous_fuzzers"
+          test "$(cfl_normalize_fuzzer visualize)" = \
+            icc_profilevisualize_fuzzer
+          test "$(cfl_normalize_fuzzer profileplot)" = \
+            icc_profilevisualize_fuzzer
+          mkdir -p /tmp/cfl-profileplot-seeds
+          cfl_install_curated_seeds "$PWD/cfl" \
+            icc_profilevisualize_fuzzer /tmp/cfl-profileplot-seeds
+          cmp test-profiles/sRGB_v4_ICC_preference.icc \
+            /tmp/cfl-profileplot-seeds/sRGB_v4_ICC_preference.icc
+          test "$(cfl_option_max_len "$PWD/cfl" \
+            icc_profilevisualize_fuzzer)" -ge 1048576
+          test "$(file -b --mime-encoding \
+            cfl/icc_profilevisualize_fuzzer.cpp)" = us-ascii
+          test "$(file -b --mime-encoding \
+            cfl/icc_applynamedcmm_fuzzer.cpp)" = us-ascii
+          test "$(cfl_tool_command icc_roundtrip_fuzzer sample.icc)" = \
+            'iccRoundTrip sample.icc 1 0'
+          .github/scripts/validate-cfl-applynamedcmm.sh
+
+      - name: Build all CFL fuzzers
+        env:
+          BASH_ENV: /dev/null
+          CC: clang
+          CXX: clang++
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          case "$PATCH_MODE" in
+            baseline)
+              cfl/build.sh --branch "$ICCDEV_REF" --refresh-iccdev
+              ;;
+            optional-stack)
+              cfl/build.sh --branch "$ICCDEV_REF" --with-patches \
+                --refresh-iccdev
+              ;;
+            *)
+              echo "Unknown patch mode: $PATCH_MODE" >&2
+              exit 1
+              ;;
+          esac
+          .github/scripts/check-afl-cfl-patches.sh
+
+      - name: Smoke profile visualization and roundtrip harnesses
+        env:
+          BASH_ENV: /dev/null
+          ASAN_OPTIONS: detect_leaks=0,halt_on_error=1,abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1,abort_on_error=1,print_stacktrace=1
+          LLVM_PROFILE_FILE: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          timeout 120s cfl/bin/icc_profilevisualize_fuzzer \
+            -runs=1 test-profiles/sRGB_v4_ICC_preference.icc
+          timeout 120s cfl/bin/icc_roundtrip_fuzzer \
+            -runs=1 test-profiles/sRGB_v4_ICC_preference.icc
+
+      - name: Replay HEIF and SpecSep curated seeds
+        env:
+          BASH_ENV: /dev/null
+          ASAN_OPTIONS: detect_leaks=0,halt_on_error=1,abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1,abort_on_error=1,print_stacktrace=1
+          LLVM_PROFILE_FILE: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          grep -Fq -- '-DAVOID_FUZZER_FALSE_POSITIVE=1' \
+            cfl/third_party/build-heif-address/libheif/CMakeCache.txt
+          source cfl/fuzzers.sh
+          for fuzzer in icc_heifdump_fuzzer icc_specsep_fuzzer; do
+            corpus="/tmp/cfl-${fuzzer}-seeds"
+            mkdir -p "$corpus"
+            cfl_install_curated_seeds "$PWD/cfl" "$fuzzer" "$corpus"
+            configured_max_len="$(cfl_option_max_len "$PWD/cfl" "$fuzzer")"
+            max_len="$(cfl_effective_max_len \
+              "$configured_max_len" "$corpus")"
+            timeout 120s "cfl/bin/$fuzzer" -runs=1 \
+              -max_len="$max_len" "$corpus"
+          done
+
+      - name: Replay ApplyNamedCmm curated seeds
+        env:
+          BASH_ENV: /dev/null
+          ASAN_OPTIONS: detect_leaks=0,halt_on_error=1,abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1,abort_on_error=1,print_stacktrace=1
+          LLVM_PROFILE_FILE: /dev/null
+        run: |
+          set -euo pipefail
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          .github/scripts/validate-cfl-applynamedcmm.sh --replay

@@ -1,0 +1,16 @@
+{
+  "comment": "Historical CIccCalculatorFunc::Apply() SBO regression seed; current builds reject the incompatible profile chain",
+  "dataFiles": {
+    "srcType": "legacy",
+    "srcFile": "docs/Testing/test-data/rgb-float.txt",
+    "dstType": "colorData",
+    "dstFile": "",
+    "dstEncoding": "float"
+  },
+  "profileSequence": [
+    {
+      "iccFile": "fuzz/graphics/icc/sbo-CIccCalculatorFunc-Apply-IccMpeCalc_cpp-Line3873.icc",
+      "intent": "relative"
+    }
+  ]
+}

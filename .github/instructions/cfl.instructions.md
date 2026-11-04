@@ -1,0 +1,129 @@
+---
+applyTo: "cfl/**"
+---
+
+# CFL Instructions - LibFuzzer Harnesses
+
+Use these instructions for `cfl/` source and LibFuzzer workflow changes.
+
+## Source Of Truth
+
+- Fuzzer list and aliases: `cfl/fuzzers.sh`
+- User-facing workflow: `cfl/README.md`
+- Zero-patch inventory: `cfl/patches/README.md`
+- Retired patch archive: `cfl/retired-patches/`
+
+Avoid count drift in docs. When the exact inventory matters, inspect the source
+scripts and filesystem in the current checkout.
+
+## Build Commands
+
+```bash
+cd cfl && ./build.sh --refresh-iccdev
+cd cfl && ./fuzz-local.sh -t 60 -w 1
+cd cfl && ./build.sh --sanitizer memory
+cd cfl && ./start.sh --sanitizer memory icc_proflib_fuzzer
+cd cfl && ./build.sh --sanitizer thread
+cd cfl && ./status.sh --detail
+cd cfl && ./status.sh --json | jq .
+```
+
+Build only against upstream `master`; do not patch the nested checkout.
+
+## Tracking Policy
+
+Track reusable CFL assets:
+
+- harness source, headers, scripts, CMake, Docker, and project config
+- retired patches
+- dictionaries and options files
+- minimal curated seeds already intended for repeatable test setup
+- promoted repro fixtures with command-line evidence
+
+Do not commit raw runtime bulk:
+
+- `cfl/bin/`
+- `cfl/build/`
+- `cfl/iccDEV/`
+- `cfl/runs/`
+- `cfl/findings/`
+- large `cfl/corpus-*` runtime output
+- logs, `.profraw`, and `.profdata`
+
+## Profile Visualization Harness
+
+- Build `icc_profilevisualize_fuzzer` against the public
+  `Tools/CmdLine/IccProfilePlot/IccVizModel.hpp` API.
+- Compile `IccVizModel.cpp` as a separate translation unit. Do not include
+  `iccProfileVisualize.cpp` from the harness or depend on private
+  `processLuts()` linkage.
+- Keep PDF/TIFF/SVG writer and argv/filesystem coverage in the tool-level AFL
+  lane; CFL owns the in-memory `Enumerate` and `Render*` data-model surface.
+- The `profileplot`, `profile-plot`, and `plot` CFL aliases select this harness.
+  Its replay hint is `iccProfilePlot ARTIFACT list`; use the AFL graph/raster
+  lanes when the finding depends on a fixed descriptor ID or output file.
+- Keep `max_len` at least 65536 so the shared sRGB v4 fixture reaches both
+  `chroma:xy` and `clut:A2B0`; `fuzz-local.sh` installs that fixture into the
+  runtime corpus.
+- Validate compatibility with `cfl/build.sh --branch ci-qa-issue-1975
+  --refresh-iccdev` while issue #1975 is active.
+
+If a generated file should travel to another VM, promote it to a stable
+fixture path and document the repro. Do not commit bulk run state just because
+it exists locally.
+
+After an upstream refresh, remove stale build output before judging build or
+sanitizer failures:
+
+```bash
+rm -rf cfl/iccDEV/Build cfl/build cfl/bin
+cd cfl && ./build.sh --refresh-iccdev
+```
+
+## Runtime Notes
+
+- Keep ASan/UBSan, MSan, and TSan as separate builds. Use `-s memory` or
+  `-s thread` with `fuzz-local.sh`, and the matching `--sanitizer` value with
+  `start.sh`, `status.sh`, and `stop.sh`.
+- TSan uses deterministic corpus replay rather than LibFuzzer mutation. Its
+  log must identify the corpus immediately, report progress every 10 seconds,
+  and print the final executed-unit count. Bound background replay wall time by
+  the requested duration plus one target timeout. Use `applyprofiles-row` when
+  the intended surface is the batched row-apply path used by `-threads`.
+- Keep the MSan build on pinned, instrumented static libc++, zlib,
+  libjpeg-turbo, libpng, libtiff, and libxml2. Reject every MSan fuzzer that
+  dynamically loads one of those libraries; an uninstrumented dependency
+  allocation can otherwise appear to be an input-driven uninitialized read at
+  the next intercepted libc call.
+- Run `cfl/test-msan-dependencies.sh` after memory builds. It checks the linked
+  dependency boundary and replays the preserved FromXml artifact plus the
+  apply-profiles `TIFFClose()` false-positive controls.
+- Do not enable source-profile instrumentation or `LLVM_PROFILE_FILE` for MSan;
+  use LibFuzzer's sanitizer-coverage counters for that lane.
+- Use `ASAN_OPTIONS=detect_leaks=0,halt_on_error=1,abort_on_error=1` for clear
+  sanitizer exits.
+- `icc_applynamedcmm_fuzzer` consumes pure raw ICC files. Do not add a control
+  prefix, suffix, or reserved-byte selector. Run
+  `.github/scripts/validate-cfl-applynamedcmm.sh --replay` after building.
+- `icc_connect_fuzzer` reads the declared ICC size and accepts only an
+  optional four-byte control trailer after that payload. A raw ICC seed must
+  remain intact.
+- `icc_cfg_fuzzer` consumes ordinary JSON without a selector prefix. Keep the
+  complete config seed, shared `icc_cfg.dict`, and all top-level and nested
+  `CIccCfg*` round trips aligned with the AFL `-cfg` lanes. Run
+  `.github/scripts/validate-afl-cfl-config-alignment.sh` after changes.
+- Every active C/C++ harness source must carry a complete redistribution and
+  warranty-disclaimer license block.
+- `fuzz-local.sh` installs `cfl/seeds-applynamedcmm/` into the NamedCmm runtime
+  corpus. Keep the tracked seed directory immutable during fuzzing.
+- Do not add fixed input-size guards to the NamedCmm, Connect, config, TIFF
+  image, or JSON/XML conversion harnesses.
+  `max_len = 0` tells the CFL runners to derive the limit from the largest
+  actual corpus file; use RSS and timeout limits for resource control and
+  include large real inputs when required.
+- Use `LLVM_PROFILE_FILE=/dev/null` when coverage files are not needed.
+- Treat OOM and timeout files as evidence candidates, not automatic commits.
+- Keep one-off run counts in dated reports, not hub docs.
+- Strengthen the existing multi-profile, serializer, V5 display-observer, and
+  image/carrier targets before adding overlapping harnesses. Image/carrier
+  MSan findings require fully instrumented dependency boundaries.

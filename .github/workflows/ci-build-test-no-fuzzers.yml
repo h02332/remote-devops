@@ -1,0 +1,21 @@
+###############################################################
+# ci-build-test-no-fuzzers.yml
+#
+# iccDEV build and test matrix without fuzzer builds.
+# Thin caller of _build-matrix.yml callable workflow.
+###############################################################
+
+name: CI Build Test (No Fuzzers)
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-matrix:
+    uses: ./.github/workflows/_build-matrix.yml
+    with:
+      report-title: 'Build and Test Results (No Fuzzers)'
+      artifact-prefix: 'build-no-fuzzers'

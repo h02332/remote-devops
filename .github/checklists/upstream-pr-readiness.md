@@ -1,0 +1,33 @@
+# Upstream PR Readiness Checklist
+
+- [ ] Exact PR authorization quotation recorded
+- [ ] Clean clone or worktree
+- [ ] Current base fetched
+- [ ] Branch rebased before PR creation
+- [ ] Any no-rebase constraint reconciled with the required base or stack parent
+- [ ] No merge commits
+- [ ] Range-diff reviewed
+- [ ] Complete diff reviewed
+- [ ] PR description covers complete scope
+- [ ] Every file changed since the most recent local review is reviewed and recorded
+- [ ] Normal build passed
+- [ ] Excluded regression helpers built
+- [ ] Complete applicable CTest passed
+- [ ] Release/Debug and compiler matrix checked
+- [ ] Diagnostics and sanitizer modes checked
+- [ ] Runtime ISA/fallback behavior checked
+- [ ] Negative tests passed
+- [ ] Configuration-contract matrix records default, override, failure-path, and compiler-boundary evidence
+- [ ] Runtime sanitizer suppression syntax verified by the actual runtime
+- [ ] Local preflight passed for workflow, Dockerfile, or CI-summary changes
+- [ ] Docker runtime user home is writable and `git config --global` works, if applicable
+- [ ] Failure summary uses same-step sanitizer fallback and checks all `tee` statuses, if applicable
+- [ ] Active review findings checked
+- [ ] Suppressed review findings checked from review threads and review summaries
+- [ ] Local review count and automated review IDs recorded
+- [ ] Each local review records date, reviewer, commit range, files, and outcome
+- [ ] Targeted build/test gate passed after the newest proposed-push change
+- [ ] Second-review new blocker, including one in the repair, stops further review until branch-only contract audit is complete
+- [ ] Generated artifacts removed
+- [ ] Related branches synchronized after canonical validation
+- [ ] Readiness result is PASS

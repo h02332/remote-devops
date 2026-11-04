@@ -1,0 +1,533 @@
+# AFL++ Tool Fuzzing
+
+`afl/` fuzzes real iccDEV command-line tools with AFL++ instrumentation. This
+complements `cfl/`, which uses LibFuzzer harnesses.
+
+Use `afl/targets.sh` as the source of truth for available targets and seed
+policy. Edit `afl/iccapply-args.conf` to change `iccApply*` target argv.
+
+## Fast Path
+
+```bash
+# Install the pinned AFL++ runtime and LLVM 21 compiler wrappers.
+./afl/build-afl-runtime.sh
+
+# Build AFL-instrumented upstream iccDEV tools without local AFL patches.
+./afl/build.sh
+
+# Build isolated MemorySanitizer and ThreadSanitizer variants.
+./afl/build.sh --sanitizer memory
+./afl/build.sh --sanitizer thread
+
+# Build the independent, non-AFL unpatched iccDEV MSan confirmation tools.
+./afl/build-iccdev-msan.sh
+
+# List targets and start a run.
+./afl/start.sh --list
+./afl/start.sh dump
+./afl/start.sh toxml --parallel 4
+
+# Select the matching sanitizer binary set at run and replay time.
+./afl/start.sh --sanitizer memory dump
+./afl/start.sh --sanitizer thread --time 60 applyprofiles-row
+./afl/triage.sh --sanitizer memory dump
+./afl/triage.sh --sanitizer thread dump
+
+# Inspect, stop, and triage.
+./afl/status.sh
+./afl/status.sh --json | jq .
+./afl/stop.sh dump
+./afl/triage.sh dump
+```
+
+The tool build requires `pkg-config`; it builds and statically links the pinned
+instrumented libheif release itself. It also verifies that every registered
+target binary was deployed. If the preserved
+`afl/iccDEV` checkout predates the HEIF or current TIFF CLI contracts, run
+`./afl/build.sh --refresh-iccdev` explicitly.
+
+After triage or a compiler/runtime update, run the bounded deterministic
+`iccApplyProfiles` sanitizer, Memcheck, and Helgrind checks documented in
+`iccapplyprofiles-qa.md`. Their evidence belongs under a native Linux path such
+as `/home/xss/qa`, not the repository or a Windows-mounted `/mnt/*` path.
+
+To preserve actionable replay artifacts for the checked-in iccDEV shell suites,
+mark them during triage:
+
+```bash
+./afl/triage.sh applytolink --mark
+./afl/triage.sh applytolink-cube --mark
+bash .github/scripts/test-iccApplyToLink.sh --quick --asan
+```
+
+`--mark` copies sanitizer, signal, and timeout artifacts into
+`afl/marked/<target>/` only after the selected independent upstream tool
+reproduces the result. For MSan, triage requires the non-AFL unpatched build
+from `./afl/build-iccdev-msan.sh`; it never treats an `afl/bin-msan/` replay as
+independent confirmation. A neighboring `.cmd` file runs the verified upstream
+sanitizer reproducer and prints its exit status. When the confirmation tool
+differs from the triage tool, `.canonical.cmd` records that secondary check.
+`test-iccApplyToLink.sh`
+automatically sweeps `afl/marked/applytolink/` and
+`afl/marked/applytolink-cube/` when those directories exist. Override the sweep
+inputs with colon-separated `ICCDEV_APPLYTOLINK_AFL_DIRS` and
+`ICCDEV_APPLYTOLINK_CUBE_AFL_DIRS`.
+
+## Target Model
+
+`afl/targets.sh` maps short target names to:
+
+- the instrumented binary in `afl/bin/`
+- seed directories
+- the dictionary copied into the per-target directory
+- any fixed arguments needed to drive multi-argument tools
+
+The fixed arguments for `iccBenchApply` and all `iccApplyNamedCmm`, `iccApplyProfiles`,
+`iccApplySearch`, and `iccApplyToLink` lanes live in
+`afl/iccapply-args.conf`. Each argument is one quoted Bash array element, and
+exactly one element must be `"@@"`. After an edit, validate and inspect the
+resolved command, then restart the target to load it:
+
+```bash
+bash -n afl/iccapply-args.conf afl/targets.sh afl/start.sh
+.github/scripts/validate-afl-target-configs.sh
+./afl/start.sh applysearch --show-argv
+./afl/stop.sh applysearch
+./afl/start.sh applysearch
+```
+
+The restart resumes the existing queue by default. Use `--fresh` when the edit
+changes the fuzzed input's role or format. Triage, mapping, coverage, and
+minimization source the same config and therefore replay with the same argv.
+
+`./afl/build.sh` builds the current upstream `master` checkout. Sanitizer modes
+are intentionally separate: `address` (the default) combines ASan, UBSan,
+IntegerSanitizer, and the float checks; `memory` uses MSan with origin tracking;
+and `thread` uses TSan. The default output directories are `afl/bin/`,
+`afl/bin-msan/`, and `afl/bin-tsan/`, with matching isolated build and
+third-party prefixes. Set `AFL_SANITIZER=memory` or `thread` when using
+`start.sh`, `screen-corpus.sh`, `map.sh`, `minimize.sh`, or `triage.sh`; an
+explicit `AFL_BIN_DIR` still takes precedence. `start.sh` and `triage.sh` also
+accept the equivalent `--sanitizer memory` or `--sanitizer thread` option. Do
+not combine these sanitizer modes in one binary.
+
+`start.sh` accepts `--time SEC` as the cross-launcher spelling for AFL's
+`--run-time SEC`; both pass AFL++ `-V SEC`. For `iccApplyProfiles`, the
+`applyprofiles-row` target selects the explicit `-threads` row-apply lane.
+
+The memory build also fetches pinned LLVM 21.1.8 runtime sources and builds a
+MemorySanitizer-instrumented static libc++. MSan requires instrumented C++
+dependencies; using the system's uninstrumented libstdc++ can taint ordinary
+standard-library state and make every seed look like a crash. `build.sh`
+rejects an MSan tool that retains a shared libstdc++ or libc++ dependency.
+
+`./afl/build-iccdev-msan.sh` separately builds the unpatched `iccDEV/` checkout
+with plain Clang and MSan-instrumented C++, XML, and image dependencies. It
+builds and verifies every command-line tool selected by MSan triage, including
+the JSON and XML conversion tools. MSan triage requires this non-AFL build,
+verifies that it contains MSan and no AFL instrumentation or shared C++ runtime
+boundary, and stops instead of falling back to `afl/bin-msan/`. Override a build
+outside the checkout with
+`ICCDEV_MSAN_BUILD_DIR=/path/to/build`; use `ICCDEV_MSAN_BIN=/path/to/tool` only
+for an equivalently verified independent build.
+
+To confirm a finding against the local AFL patch stack, first run
+`./afl/build.sh --with-patches`, then build a non-AFL binary from that isolated
+source with `ICCDEV_MSAN_SOURCE_DIR=$PWD/afl/iccDEV`, an external
+`ICCDEV_MSAN_BUILD_DIR`, and
+`./afl/build-iccdev-msan.sh --skip-dependencies --allow-patched-source`.
+Set the same `ICCDEV_MSAN_BUILD_DIR` while running `triage.sh`. The report labels
+that replay `canonical-msan-patched`; the default root build is labeled
+`canonical-msan-unpatched`.
+
+The current target list includes tool-level coverage for profile dumping,
+XML/JSON conversion, image extraction, CUBE import, PAWG reporting, profile
+visualization, profile linking, and CMM apply flows. Run `./afl/start.sh --list`
+for the exact list in the active checkout.
+
+Fresh CLI paths have dedicated lanes rather than sharing a saturated default
+argv: `fromjson-noid` covers profile-ID suppression; `heifdump-extract` uses an
+isolated output directory per execution; `tiffdump-ifd` and `tiffdump-list`
+cover directory selection and inventory; and the SpecSep profile lanes use
+channel-compatible conformant bootstrap profiles so their fixed TIFF sets
+reach pixel output. `specseptotiff-tiles` and `specseptotiff-bigtiff` cover the
+new TIFF output layouts. The `specseptotiff-tiff` wrapper derives compression,
+planar, tiled, and BigTIFF modes from the input's final byte while AFL mutates
+the raw one-channel TIFF. The HEIF extraction
+wrapper disables the forkserver because it must create and remove a unique
+directory around each tool invocation. The launcher queries the instrumented
+child for its real map size, so extraction-lane density is not divided by the
+generic 1 MiB bitmap.
+
+Both HEIF lanes accept carriers smaller than 5 MiB, disable AFL trimming so the
+ISO BMFF box hierarchy is not reduced to shallow parser-rejection inputs, and
+skip deterministic inference so large carriers reach stochastic mutation
+without multi-hour arithmetic stages. The carrier lane retains valid and
+malformed seeds. The extraction lane admits only seeds that complete
+successfully and therefore reach raw ICC output. To
+cover the tool-owned property, association, and extracted-byte limits, the
+launcher also generates three deterministic structural carriers under the
+ignored `afl/support/` tree. libheif itself is codec-disabled, statically
+linked, and AFL-instrumented, so mutations retained for ISO BMFF parser coverage
+are now visible to both HEIF lanes. To
+add a local corpus without committing it, use the shared colon-separated seed
+variable and start fresh because the seed contract changed:
+
+```bash
+ICCDEV_HEIF_SEED_DIRS=/mnt/f/lynx ./afl/start.sh heifdump --fresh
+ICCDEV_HEIF_SEED_DIRS=/mnt/f/lynx ./afl/start.sh heifdump-extract --fresh
+```
+
+The TIFF dump, extraction, explicit-IFD, and directory-list lanes skip
+deterministic stages, use fast calibration, and expand havoc. Their large,
+format-aware seed corpus and dictionary already cover byte-level structure;
+this policy avoids multi-hour inference passes and moves the single worker on
+each VM to stochastic mutations sooner. Dump, extraction, and explicit-IFD
+also disable low-yield trimming. The directory-list lane retains trimming
+because its campaign demonstrated substantial size reduction while preserving
+coverage. That lane also bounds fresh startup to one explicit multi-IFD seed
+plus at most 32 sub-1-MiB samples from each of the codec and TIFF fuzz corpora;
+full-image carriers and duplicate external package trees add startup cost but
+do not add directory-list behavior.
+
+The 5 MiB default keeps large-carrier startup and mutation costs bounded, but
+it is an overridable campaign policy rather than a parser limit. With the
+default 64 MiB AFL++ runtime, admit carriers below 64 MiB with matching seed
+and mutation ceilings:
+
+```bash
+ICCDEV_HEIF_SEED_DIRS=/mnt/f/lynx ./afl/start.sh heifdump --fresh \
+  --seed-max-bytes 67108864 --max-length 67108864
+ICCDEV_HEIF_SEED_DIRS=/mnt/f/lynx ./afl/start.sh heifdump-extract --fresh \
+  --seed-max-bytes 67108864 --max-length 67108864
+```
+
+For larger campaigns, rebuild the runtime with a higher
+`AFL_MAX_FILE_BYTES`, then raise both launcher values together. The native
+property reader rejects carriers larger than 256 MiB, so increasing AFL beyond
+that boundary adds no iccHeifDump parser coverage.
+
+Use `./afl/map.sh TARGET --input` and `--queue` to compare absolute edge counts.
+Map density remains small because the target is linked with the full
+instrumented IccProfLib; it is not by itself a measure of campaign progress.
+
+### iccProfilePlot modes
+
+The data-first plot tool has three lanes because each CLI mode reaches a
+different output surface:
+
+- `profileplot` runs `iccProfilePlot @@ list` and serializes descriptors.
+- `profileplot-graph` renders `chroma:xy` graph geometry as JSON.
+- `profileplot-raster` renders `clut:A2B0` and writes raw samples to an
+  isolated per-process scratch file.
+
+All three use screened ICC inputs capped at 256 KiB and require a successful
+seed replay. The durable `test-profiles/sRGB_v4_ICC_preference.icc` fixture
+contains both fixed descriptor IDs. Validate the target and fixture contract
+before a campaign:
+
+```bash
+.github/scripts/validate-afl-profileplot-targets.sh --replay
+./afl/start.sh profileplot --seed-only --fresh
+./afl/start.sh profileplot-graph --seed-only --fresh
+./afl/start.sh profileplot-raster --seed-only --fresh
+```
+
+CFL complements these lanes through its `profileplot` alias, which selects the
+in-memory `icc_profilevisualize_fuzzer` and renders every enumerated descriptor
+without CLI or filesystem coverage.
+
+### Full-size hybrid image lane
+
+`applyprofiles-hybrid-embedded` mutates the complete generated 600x420
+multispectral TIFF. It does not crop or downsample the image, so the lane keeps
+the real-world pixel traversal, planar/compressed TIFF handling, embedded
+profile, PCC, tetrahedral interpolation, and black-point compensation paths.
+Slower hardware needs substantially more than the global five-second default,
+so this target defaults both seed screening and AFL execution to 120 seconds.
+An explicit `AFL_TIMEOUT` or `--timeout` still takes precedence.
+
+Use LibTIFF tools such as `tiffinfo` for local TIFF structure checks. On
+Ubuntu, install them with `sudo apt-get install libtiff-tools`.
+
+This lane does not set a seed or generated-input byte cap. The pinned AFL++
+runtime is 5.04a development commit
+`2400206be6fe0d93681c8a5c1535209366602eb1`,
+built with `-j32` and a configurable 64 MiB default `MAX_FILE` safety bound by
+`afl/build-afl-runtime.sh`. Image seed discovery is uncapped; set
+`AFL_MAX_FILE_BYTES` when building for inputs above the default. `start.sh`
+checks explicit mutation lengths against the runtime before launching.
+The builder preserves local `include/config.h` changes across the checkout,
+then sets `MAX_FILE` from `AFL_MAX_FILE_BYTES`. The launcher prints the resolved
+runtime path and version; `AFL_FUZZ_BIN` overrides the `afl-fuzz` found in `PATH`.
+Restart an existing campaign after updating the runtime, since an already
+running process continues using its old executable.
+
+### iccApplyNamedCmm argv lanes
+
+Use separate targets for materially different command-line parsers and transform
+shapes:
+
+- `applynamedcmm` fuzzes one profile after fixed legacy RGB data arguments.
+  It uses absolute colorimetric intent `3` so the ordinary lane complements
+  the hybrid extended-intent paths. A known sRGB profile guarantees startup;
+  directory candidates must be ICC files that complete the transform with
+  exit 0.
+- `applynamedcmm-v5-brdf` uses 16-bit-v2 output and selector `10063` with the
+  tracked V5 `bDB0` fixture, combining V5 sub-profile, BRDF-direct, absolute
+  intent, and tetrahedral paths.
+- `applynamedcmm-debugcalc` guarantees the calculator-bearing `argbCalc.icc`
+  bootstrap while exercising float output, formatting, linear interpolation,
+  and calculator tracing. It uses a one-second execution timeout so malformed
+  calculator profiles cannot hold a worker at the global five-second default;
+  use an explicit `AFL_TIMEOUT` or `--timeout` for longer-path experiments.
+- `applynamedcmm-cfg` fuzzes the JSON document consumed by `-cfg`.
+
+The three tool-level JSON configuration lanes share `cfl/icc_cfg.dict` and
+admit `docs/Testing/json-configs/connect-config-complete.json` in addition to
+their tool-specific positive and negative fixtures. The complete fixture keeps
+`dataFiles`, `imageFiles`, `connect`, `createLink`, `profileSequence`,
+`searchApply`, `pccWeights`, and `colorData` mutually reachable. Each AFL
+lane still screens the document through its real CLI from an isolated work
+tree. Run `.github/scripts/validate-afl-cfl-config-alignment.sh` and
+`.github/scripts/validate-afl-target-configs.sh` after changing this contract.
+
+Treat these config lanes as bounded field/value QA rather than continuous
+transform fuzzing. Mutating the `-cfg` document primarily covers JSON parsing
+and early configuration validation, even though a valid seed can reach the
+configured transform. Accordingly, `afl/run-all.sh` defaults to `continuous`
+and excludes `applynamedcmm-cfg`, `applyprofiles-cfg`,
+`applyprofiles-search`, and `applysearch-cfg`. Use `run-all.sh qa`,
+`run-all.sh all`, or an explicit target name to run them. The `fromjson` and
+`fromjson-noid` lanes remain continuous because they import an ICC profile
+represented as JSON rather than a tool control document.
+
+- `applynamedcmm-hybrid-chain` explicitly selects the spectral transform in
+  the fixed CMYK V5 sub-profile at intent `10103`, then fuzzes a second profile
+  at intent `10` while exercising `-exportcfganddata`.
+- `applynamedcmm-hybrid-pcc` applies the fixed CMYK profile and fuzzes its V5
+  PCC profile, covering `-ENV` and `-PCC` parsing. It inventories V5 profiles
+  under `iccDEV/Testing`, guarantees the generated D50 PCC fixture as a
+  bootstrap seed, and also scans the five package `ICC/` directories when an
+  `ICS-POC/` checkout is present. Set `AFL_ICS_POC_ROOT` when that checkout is
+  elsewhere.
+
+The NamedCMM hybrid lanes deliberately admit only complete ICC files smaller
+than their 1 MiB target policy and dry-run directory candidates to require exit
+0. Validated explicit bootstrap profiles bypass that screening so each lane can
+start even when a broad mixed corpus contains no compatible transform. This
+avoids AFL++ silently fuzzing a partial read of a larger profile. Export paths
+use the target scratch prefix so parallel workers do not overwrite one shared
+JSON file.
+The PCC lane further requires `file(1)` to identify profile version 5, keeping
+XML sources and generated TIFF results out of an ICC-only `@@` position.
+Use `afl/start.sh`'s default map size for these instrumented binaries. A manually
+fixed 131072-byte map can be smaller than the target reports and forces AFL++ to
+reinitialize the map before fuzzing.
+
+CFL NamedCmm now uses pure ICC inputs and supports corpus-derived multi-megabyte
+limits. Promotion into AFL is intentionally one-way and size-checked: copy only
+a complete ICC file below 1 MiB. Keep larger profiles in CFL, or design a tool
+lane with the large profile fixed and a bounded `@@` companion. Never truncate
+the profile to fit that lane's testcase policy.
+
+```bash
+./afl/start.sh applynamedcmm-hybrid-chain --run-time 300
+./afl/start.sh applynamedcmm-hybrid-pcc --fresh --seed-only --seed-order sorted
+./afl/start.sh applynamedcmm-cfg --mode rare --run-time 300
+.github/scripts/validate-afl-applynamedcmm-targets.sh
+bash .github/scripts/test-iccApplyNamedCmm.sh --quick --asan
+```
+
+The target-contract validator is binary-independent. It checks the four target
+registrations, exact argument order, process-specific export paths, JSON input
+mode, hybrid seed ceiling, and exit-zero dry-run requirement without launching
+a fuzzer.
+
+### iccFromXml external-include lane
+
+Use `fromxml-includes` for primary XML profiles that consume external TXT or XML
+files relative to the process working directory. The target stages a checked,
+read-only support tree from `iccDEV/Testing`, including transitive calculator
+imports, and mutates only the 10 standalone primary profiles below AFL++'s
+1 MiB testcase ceiling. Five larger standalone fixtures remain in the manifest
+for exact direct replay; they are never truncated into AFL inputs. Dependency
+staging ignores `Filename` attributes inside XML comments.
+
+```bash
+.github/scripts/validate-afl-fromxml-includes.sh
+./afl/start.sh fromxml-includes --seed-only --fresh
+./afl/start.sh fromxml-includes --fresh
+./afl/map.sh fromxml-includes --input
+```
+
+Keep `fromxml` and `fromxml-noid` for standalone XML mutation. The include lane
+does not mutate dependency contents; that requires a future dedicated AFL custom
+mutator rather than a shell wrapper around `iccFromXml`.
+
+For direct reproduction, first configure or stage the lane and then run from
+`afl/support/fromxml-includes`; otherwise relative TXT/XML dependencies are not
+visible. Prefer `./afl/triage.sh fromxml-includes`, which does this automatically.
+Its marked `.cmd` files use the same working directory and an absolute artifact
+path. `output/default/queue` is the expected queue for a single instance;
+parallel runs use `output/main/queue` and `output/secondary_N/queue`.
+
+JSON `-cfg` targets deliberately run from `afl/work/<target>/root`, populated
+with read-only copies of required input fixtures. Fuzzed relative output fields
+therefore land in disposable target work state rather than the repository root.
+
+`applyprofiles-search` keeps one valid `useSearch` configuration alive long
+enough to reach the spectral inverse-search transform, initial transform, and
+four weighted PCC paths. Both seed screening and AFL execution default to 30
+seconds because an MSan-instrumented first execution can exceed five seconds on
+WSL2 even though the same seed is much faster on native Linux. The target uses
+fast calibration, skips deterministic inference, and starts expanded havoc so
+the additional timeout margin does not delay ordinary mutation work. For a
+fresh MSan campaign, run:
+
+```bash
+./afl/start.sh --sanitizer memory --fresh --mode rare applyprofiles-search
+```
+
+An explicit `AFL_TIMEOUT` or `--timeout` still overrides the AFL execution
+timeout. It does not change the target's 30-second seed-screening safety bound.
+
+`applyprofiles-hybrid-pcc` seeds only the known-compatible
+`MultSpectralRGB.icc` PCC fixture. Its complete multispectral TIFF transform is
+slow enough to require a 30-second dry-run and AFL timeout; broad ICC directories
+must not be reintroduced because screening them delays AFL startup without
+adding usable seeds.
+
+`applyprofiles-hybrid-embedded` keeps the required complete multispectral TIFF,
+but skips AFL++'s enhanced deterministic inference stage. That stage can spend
+minutes rewriting a multi-megabyte structured image while the UI reports
+`0.00/sec (zzzz...)`. The lane uses fast calibration and enables expanded havoc
+immediately so short campaigns reach mutation work instead of startup analysis.
+The documented form is `./afl/start.sh applyprofiles-hybrid-embedded --fresh`;
+the parser also accepts `--fresh` before the target.
+
+## Campaign Modes
+
+`afl/start.sh` provides named AFL++ 5.x campaign modes so mutation strategy and
+power schedule are selected together:
+
+```bash
+./afl/start.sh dump --mode explore
+./afl/start.sh dump --mode exploit
+./afl/start.sh dump --mode rare
+./afl/start.sh dump --mode fast
+./afl/start.sh dump --mode mopt
+./afl/start.sh fromxml --mode cmplog
+./afl/start.sh dump --mode diverse
+```
+
+The `cmplog` mode requires a matching executable under `afl/bin-cmplog/` or an
+explicit `--cmplog-binary`. The `diverse` mode defaults to eight synchronized
+workers with different explore/exploit strategy and power-schedule pairs. Use
+`--strategy` and `--power-schedule` directly for a custom single strategy.
+
+## Coverage and Reachability Toolchain
+
+`afl/build.sh` uses the system `clang`/`clang++` and compatible AFL++ wrappers.
+Run `afl/build-afl-runtime.sh` to reproduce the pinned runtime. On Ubuntu 26.04
+its prerequisites include `clang`, `llvm-tools`, `llvm-dev`, `lld`,
+`libclang-rt-dev`, and `gcc-15-plugin-dev`.
+
+For source coverage, `afl/coverage.sh` selects the system `clang`/`clang++` and
+`cov-analysis` then uses matching LLVM coverage tools.
+Override with `AFL_COVERAGE_CC` and `AFL_COVERAGE_CXX` only when
+running a compatibility experiment or reproducing a report from another LLVM
+major.
+
+For static reachability, rebuild the local analyzer after changing LLVM major:
+
+```bash
+LLVM_MAJOR=21 bash "$HOME/work/copilot/tools/fuzz-reachability/scripts/setup.sh"
+reachability check-toolchain
+```
+
+## Reports
+
+`./afl/report.sh all` emits the final `targets.tsv` in the order reported by
+`./afl/start.sh --list`. Targets without AFL output are recorded as
+`not_started` and skipped quickly; targets with output run map, triage, source
+coverage, and reachability steps unless disabled. Use `--target-jobs N` to run
+independent targets concurrently; choose `--jobs * --target-jobs` near the
+available CPU count. The default whole-target coverage timeout is 3600 seconds,
+so a full all-target report can still run for hours when several active targets
+need coverage replay.
+
+For quick status, use `./afl/report.sh all --stats-only --target-jobs 8` or
+`./afl/report.sh all --no-coverage --target-jobs 8`. For focused reachability,
+prefer a single target command such as
+`./afl/report.sh fromcube --jobs 2 --target-timeout 3600`.
+Each report root includes `summary.tsv`; use it for pipeline checks and quick
+artifact counts without parsing Markdown.
+Use `./afl/report.sh TARGET --marked-only` when reviewing already marked
+reproduction artifacts; it skips maps and coverage and triages only
+`afl/marked/TARGET`.
+During long runs, monitor `afl/reports/generated/latest/targets.tsv`, the
+per-target logs under `afl/reports/generated/latest/logs/`, and
+`./afl/status.sh --json`.
+
+## A/B Role
+
+| AFL++ | CFL |
+|-------|-----|
+| Runs real tool binaries | Runs LibFuzzer harnesses |
+| Best for CLI parsing, file handling, and user-facing repros | Best for deep library coverage |
+| Triage against upstream reference tools | Compare patched vs unpatched builds |
+
+Use AFL++ findings to produce concrete tool repros, then validate the same
+root cause through upstream ASAN/UBSAN builds before filing or patching.
+
+## What Belongs In Git
+
+Track reusable AFL assets:
+
+- `afl/*.sh` orchestration scripts
+- `afl/targets.sh`
+- curated per-target dictionaries such as `afl/afl-dump/dump.dict`
+- curated seed inputs only when they are intentionally promoted fixtures
+
+Keep runtime output local unless promoted:
+
+- `afl/bin/`
+- `afl/iccDEV/`
+- `afl/afl-*/output*/`
+- AFL queue, crash, hang, stats, and log output
+
+If a crash, hang, timeout, or minimized queue entry becomes durable evidence,
+move it to `test-profiles/`, `fuzz/`, or `docs/pocs/` with a short repro note
+instead of committing a raw runtime directory.
+
+## Triage Rule
+
+AFL-instrumented crashes are not automatically upstream bugs. Re-run the input
+against the intended upstream reference build under ASAN/UBSAN and record the
+exact command, input path, exit mode, and sanitizer summary.
+
+Locally retained findings with exact replay commands are recorded in
+`docs/afl/local-reproductions.md`.
+
+Timeout-only artifacts are not automatically actionable. `afl/triage.sh`
+separates `TIMEOUT`, `TIMEOUT_WITH_SANITIZER`, `SANITIZER`, `SIGNAL`,
+`SOFT_FAIL`, and `CLEAN`. For stricter hang replay, set
+`AFL_TRIAGE_HANG_REPEATS=N`. Set `AFL_TRIAGE_MARK_TIMEOUTS=0` to avoid marking
+plain timeout-only inputs while still preserving sanitizer and signal findings.
+Tool scratch paths default under `afl/tmp`; override with `AFL_TMP_ROOT` only
+when a run needs a different local scratch directory.
+
+```bash
+ASAN_OPTIONS=detect_leaks=0,halt_on_error=1,abort_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1,print_stacktrace=1 \
+LD_LIBRARY_PATH=iccDEV/Build/IccProfLib:iccDEV/Build/IccXML \
+  iccDEV/Build/Tools/IccDumpProfile/iccDumpProfile path/to/input.icc ALL
+```
+
+## Notes
+
+- Keep exact target counts, corpus sizes, and dated coverage figures in reports
+  or command output.
+- Use `./afl/status.sh --detail` when deciding what to stop, reap, or triage.
+- Use `./afl/stop.sh --reap` only for stale empty output state.

@@ -1,0 +1,178 @@
+---
+applyTo: "afl/**,docs/afl/**"
+---
+
+# AFL++ Instructions - Tool-Level Fuzzing
+
+Use these instructions for files under `afl/` and AFL++ work that drives real
+iccDEV tool binaries.
+
+## Source Of Truth
+
+- Target list, seed policy, and argument scaffolds: `afl/targets.sh`
+- Editable apply-tool command lines, including `iccBenchApply`:
+  `afl/iccapply-args.conf`
+- User-facing workflow: `docs/afl/index.md`
+- Shared dictionaries: `cfl/*.dict`
+- Runtime outputs: ignored under `afl/afl-*/output*/`
+
+Do not duplicate exact target counts in docs. Run `./afl/start.sh --list` or
+read `afl/targets.sh` in the current checkout.
+
+After editing an apply-tool argument array, run
+`.github/scripts/validate-afl-target-configs.sh` and inspect the resolved command
+with `./afl/start.sh TARGET --show-argv`. Stop and restart the target before
+testing because running AFL processes do not reload the config.
+
+## JPEG AFL Seed Contract
+
+The `jpegdump` and `jpegdump-inject` lanes fuzz JPEG media only. They must seed
+only `.jpg`/`.jpeg` files from `fuzz/graphics/jpg` that contain an embedded ICC
+profile. Do not seed either lane from `test-profiles/`, `extended-test-profiles/`,
+`fuzz/graphics/icc/`, or any raw `.icc` corpus. Keep `SEED_LIMIT=200` and run
+`.github/scripts/validate-afl-jpeg-seeds.sh` after changing JPEG AFL seeding.
+
+## Standard Commands
+
+```bash
+./afl/build-afl-runtime.sh
+./afl/build.sh          # default: unpatched upstream iccDEV
+./afl/build.sh --sanitizer memory
+./afl/build.sh --sanitizer thread
+./afl/start.sh --list
+./afl/start.sh dump
+./afl/start.sh --sanitizer memory dump
+./afl/start.sh --sanitizer thread --time 60 applyprofiles-row
+./afl/start.sh toxml --parallel 4
+./afl/status.sh --detail
+./afl/status.sh --json | jq .
+./afl/stop.sh dump
+./afl/triage.sh dump
+.github/scripts/check-afl-cfl-patches.sh
+.github/scripts/validate-afl-applynamedcmm-targets.sh
+.github/scripts/validate-afl-jpeg-seeds.sh
+.github/scripts/validate-afl-profileplot-targets.sh
+.github/scripts/validate-afl-target-configs.sh
+.github/scripts/validate-afl-target-configs.sh --local --sanitizer memory
+```
+
+MSan and TSan use isolated `Build-AFL-*`, `bin-*`, and third-party dependency
+directories. Select the matching runtime with `start.sh --sanitizer memory`,
+`start.sh --sanitizer thread`, or the corresponding `AFL_SANITIZER` variable;
+do not combine sanitizer modes in one binary. MSan builds pin and compile an
+instrumented static libc++ because linking the tools to the system's
+uninstrumented libstdc++ produces invalid shadow-state reports.
+
+The runtime builder pins AFL++ 5.04a development commit
+`2400206be6fe0d93681c8a5c1535209366602eb1`, selects the `llvm-config` matching
+the system Clang major, and uses `-j32`. Its compiled large-input safety bound
+defaults to 64 MiB and can be raised with `AFL_MAX_FILE_BYTES`; image seed
+discovery has no repository byte cap. The
+`applyprofiles-hybrid-embedded` lane requires that runtime, uses the complete
+generated multispectral TIFF, and leaves `-G` at the runtime bound. Do not
+restore the historical 64x64 crop. `start.sh` must reject a runtime whose
+compiled safety bound is lower than a target's requested `-G` value.
+
+## iccApplyNamedCmm CLI Shapes
+
+Keep distinct AFL targets for the one-profile legacy-data lane, `-cfg` JSON,
+the fixed-v5-then-fuzzed-profile hybrid chain, and the fixed-v5/fuzzed-PCC
+hybrid chain. Use `applynamedcmm-hybrid-chain` for this argv shape:
+
+```text
+-exportcfganddata OUT DATA 3 1 FIXED_CMYK_V5 10103 @@ 10
+```
+
+The `10103` selector combines the V5 subprofile modifier, the spectral
+transform selector, and absolute colorimetric intent. Keep the dedicated
+`applynamedcmm-v5-brdf` lane on `10063` with
+`extended-test-profiles/tag-checks/dtob-brdf.icc` so BRDF-direct and V5
+subprofile selection remain independently seedable.
+
+NamedCMM hybrid seeds must be complete ICC files smaller than the lane's 1 MiB
+policy. Directory candidates must pass the target dry run with exit 0; each
+explicit bootstrap is validated separately and bypasses corpus screening. Use a
+per-process scratch path for exported JSON; never make parallel workers
+overwrite one fixed config path.
+
+Do not copy CFL's corpus-derived large-input policy into AFL++. CFL NamedCmm
+seeds are pure ICC files, but only complete files below 1 MiB may be promoted
+to an AFL `@@` corpus with this build. Keep larger profiles in CFL, or add an
+explicit AFL lane that holds the large profile fixed and fuzzes a bounded
+companion input; never truncate a CFL profile for promotion.
+
+Do not hardcode `AFL_MAP_SIZE=131072` for NamedCMM lanes. Use `afl/start.sh`'s
+default unless the current instrumented binary has been measured explicitly;
+the target map can exceed 131072 bytes.
+
+Run `.github/scripts/validate-afl-applynamedcmm-targets.sh` after changing any
+NamedCMM target arguments, seed limits, dry-run policy, or export path handling.
+
+## JSON Config Lanes
+
+`applynamedcmm-cfg`, `applyprofiles-cfg`, and `applysearch-cfg` share the
+canonical `cfl/icc_cfg.dict` dictionary and the schema-shaped
+`docs/Testing/json-configs/connect-config-complete.json` seed. Keep the
+tool-specific positive seeds too, require seed dry runs, and retain isolated
+`afl/work/<target>/root` directories for config-controlled paths. Run
+`.github/scripts/validate-afl-cfl-config-alignment.sh` and
+`.github/scripts/validate-afl-target-configs.sh` after changing this contract.
+
+## iccProfilePlot CLI Shapes
+
+Keep separate `profileplot`, `profileplot-graph`, and `profileplot-raster`
+targets for descriptor enumeration, graph JSON, and CLUT raw-output coverage.
+Use `test-profiles/sRGB_v4_ICC_preference.icc` as the durable fixture contract:
+it must enumerate `chroma:xy` and `clut:A2B0`. Raster output must use the
+per-process scratch prefix. Run
+`.github/scripts/validate-afl-profileplot-targets.sh --replay` after changing
+the arguments, fixture, identifiers, or output-path handling.
+
+## Tracking Policy
+
+Track reusable AFL assets:
+
+- orchestration scripts
+- `afl/targets.sh`
+- curated dictionaries
+- promoted seed or repro fixtures
+
+Do not commit raw run output:
+
+- `afl/bin/`
+- `afl/iccDEV/`
+- `afl/afl-*/output*/`
+- logs, queues, crash/hang directories, and stats files
+
+Promote an artifact only after it has a stable name, a reproducible command,
+and a clear purpose. Prefer `test-profiles/`, `fuzz/`, or `docs/pocs/` for
+durable fixtures.
+
+## Triage Rule
+
+An AFL crash is actionable only after replay against the intended upstream
+reference build under ASAN/UBSAN. Record the exact tool path, input path,
+arguments, sanitizer options, exit code, and summary.
+
+Use:
+
+```bash
+ASAN_OPTIONS=detect_leaks=0,halt_on_error=1,abort_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1,print_stacktrace=1 \
+LD_LIBRARY_PATH=iccDEV/Build/IccProfLib:iccDEV/Build/IccXML \
+  iccDEV/Build/Tools/IccDumpProfile/iccDumpProfile path/to/input.icc ALL
+```
+
+Adjust the tool and arguments to match the AFL target.
+
+For bounded `iccApplyProfiles` sanitizer, Memcheck, or Helgrind validation, use
+the checked-in scripts under `.github/ci/quality-assurance/scripts/`. Keep
+their output in a native Linux filesystem such as `/home/xss/qa`; do not run
+the measured workload from `/mnt/c` or `/mnt/e`. Valgrind requires a separate
+non-sanitized debug build and must never wrap an ASAN/UBSAN binary.
+
+## Corpus Minimization
+
+For ASAN-instrumented binaries, prefer `afl-cmin.bash` over Python `afl-cmin`
+when memory pressure is high. Keep minimized results local unless they are
+promoted as curated fixtures.

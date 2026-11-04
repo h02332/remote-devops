@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# pre-push-gate.sh - Unified pre-push validation for active components
+#
+# Runs the minimum viable checks before ANY push to main.
+# Detects which components changed and runs appropriate tests.
+#
+# Usage: .github/scripts/pre-push-gate.sh
+# Exit 0 = safe to push, Exit 1 = fix issues first
+#
+# This replaces the scattered "MANDATORY" sections across 4 instruction files
+# with a single executable checklist.
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+ERRORS=0
+WARNINGS=0
+SKIPPED=0
+AFL_JPEG_SEED_PATTERN='afl/targets.sh\|afl/start.sh\|afl/README.md\|\.github/scripts/validate-afl-jpeg-seeds.sh\|\.github/instructions/afl.instructions.md\|\.github/instructions/fuzz.instructions.md\|\.github/prompts/.*fuzzer.*\.prompt.md\|\.github/skills/corpus-management/SKILL.md\|AGENTS.md\|\.github/copilot-instructions.md'
+AFL_NAMEDCMM_PATTERN='afl/targets.sh\|afl/start.sh\|afl/README.md\|docs/afl/index.md\|\.github/scripts/validate-afl-applynamedcmm-targets.sh\|\.github/instructions/afl.instructions.md'
+AFL_TARGET_CONFIG_PATTERN='afl/targets.sh\|afl/start.sh\|\.github/scripts/validate-afl-target-configs.sh\|\.github/instructions/afl.instructions.md'
+AFL_CFL_CONFIG_PATTERN='afl/targets.sh\|cfl/fuzzers.sh\|cfl/icc_cfg\|cfl/icc_connect_fuzzer.cpp\|docs/Testing/json-configs/connect-config-complete.json\|\.github/scripts/validate-afl-cfl-config-alignment.sh\|\.github/scripts/unbundle-fuzzer-input.sh\|\.github/instructions/\(afl\|cfl\).instructions.md'
+AFL_PROFILEPLOT_PATTERN='afl/targets.sh\|afl/triage.sh\|afl/README.md\|docs/afl/index.md\|test-profiles/sRGB_v4_ICC_preference.icc\|\.github/scripts/validate-afl-profileplot-targets.sh\|\.github/instructions/afl.instructions.md'
+CFL_NAMEDCMM_PATTERN='cfl/icc_applynamedcmm_fuzzer.cpp\|cfl/fuzzers.sh\|cfl/fuzz-local.sh\|cfl/seeds-applynamedcmm/\|\.github/scripts/validate-cfl-applynamedcmm.sh\|\.github/instructions/cfl.instructions.md'
+ICC_APPLYPROFILES_QA_PATTERN='afl/build-afl-runtime.sh\|docs/afl/iccapplyprofiles-qa.md\|\.github/ci/quality-assurance/scripts/iccApplyProfiles_.*_qa.sh\|\.github/scripts/validate-iccapplyprofiles-qa.sh\|\.github/skills/icc-tool-qa/SKILL.md\|\.github/prompts/iccapplyprofiles-qa.prompt.md\|\.github/agents/icc-tool-qa.agent.md'
+
+echo -e "${BOLD}+--------------------------------------------------+${NC}"
+echo -e "${BOLD}|         PRE-PUSH VALIDATION GATE                |${NC}"
+echo -e "${BOLD}+--------------------------------------------------+${NC}"
+echo ""
+
+# Detect what changed (uncommitted + last commit vs remote)
+CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+CHANGED_FILES="$CHANGED_FILES
+$(git diff --name-only 2>/dev/null || echo "")"
+
+has_changes() {
+  echo "$CHANGED_FILES" | grep -q "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------
+# GATE 0: GitHub/workflow/hook preflight
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 0] GitHub/workflow preflight${NC}"
+
+if has_changes "\.github/\|\.githooks/"; then
+  if .github/scripts/preflight-safety-checks.sh; then
+    echo -e "  ${GREEN}preflight OK${NC}"
+  else
+    echo -e "  ${RED}preflight FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no GitHub/hook/container changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 1: AFL ApplyNamedCmm target contracts
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 1] AFL ApplyNamedCmm target contracts${NC}"
+
+if has_changes "$AFL_NAMEDCMM_PATTERN"; then
+  if .github/scripts/validate-afl-applynamedcmm-targets.sh; then
+    echo -e "  ${GREEN}AFL ApplyNamedCmm target contracts OK${NC}"
+  else
+    echo -e "  ${RED}AFL ApplyNamedCmm target contracts FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no AFL ApplyNamedCmm target contract changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 1A: AFL target configuration contracts
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 1A] AFL target configuration contracts${NC}"
+
+if has_changes "$AFL_TARGET_CONFIG_PATTERN"; then
+  if .github/scripts/validate-afl-target-configs.sh; then
+    echo -e "  ${GREEN}AFL target configuration contracts OK${NC}"
+  else
+    echo -e "  ${RED}AFL target configuration contracts FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no AFL target configuration changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 1A.1: Shared AFL/CFL config contracts
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 1A.1] Shared AFL/CFL config contracts${NC}"
+
+if has_changes "$AFL_CFL_CONFIG_PATTERN"; then
+  if .github/scripts/validate-afl-cfl-config-alignment.sh; then
+    echo -e "  ${GREEN}Shared AFL/CFL config contracts OK${NC}"
+  else
+    echo -e "  ${RED}Shared AFL/CFL config contracts FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no shared AFL/CFL config changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 1B: AFL ProfilePlot target and fixture contracts
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 1B] AFL ProfilePlot contracts${NC}"
+
+if has_changes "$AFL_PROFILEPLOT_PATTERN"; then
+  if .github/scripts/validate-afl-profileplot-targets.sh; then
+    echo -e "  ${GREEN}AFL ProfilePlot contracts OK${NC}"
+  else
+    echo -e "  ${RED}AFL ProfilePlot contracts FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no AFL ProfilePlot contract changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 1C: bounded iccApplyProfiles QA contracts
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 1C] iccApplyProfiles QA contracts${NC}"
+
+if has_changes "$ICC_APPLYPROFILES_QA_PATTERN"; then
+  if .github/scripts/validate-iccapplyprofiles-qa.sh; then
+    echo -e "  ${GREEN}iccApplyProfiles QA contracts OK${NC}"
+  else
+    echo -e "  ${RED}iccApplyProfiles QA contracts FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no iccApplyProfiles QA contract changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 2: CFL ApplyNamedCmm input and seed contracts
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 2] CFL ApplyNamedCmm contracts${NC}"
+
+if has_changes "$CFL_NAMEDCMM_PATTERN"; then
+  if .github/scripts/validate-cfl-applynamedcmm.sh; then
+    echo -e "  ${GREEN}CFL ApplyNamedCmm contracts OK${NC}"
+  else
+    echo -e "  ${RED}CFL ApplyNamedCmm contracts FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no CFL ApplyNamedCmm contract changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 3: AFL JPEG seed policy
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 3] AFL JPEG seed policy${NC}"
+
+if has_changes "$AFL_JPEG_SEED_PATTERN"; then
+  if .github/scripts/validate-afl-jpeg-seeds.sh; then
+    echo -e "  ${GREEN}AFL JPEG seed policy OK${NC}"
+  else
+    echo -e "  ${RED}AFL JPEG seed policy FAILED${NC}"
+    ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo -e "  ${YELLOW}(no AFL JPEG seed policy changes - skipped)${NC}"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# GATE 4: Documentation and repository state
+# ---------------------------------------------------
+echo -e "${BOLD}[GATE 4] Consistency checks${NC}"
+
+# 3a. Git status clean
+echo -n "  Working tree: "
+if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
+  echo -e "${GREEN}clean${NC}"
+else
+  DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  echo -e "${YELLOW}$DIRTY uncommitted file(s)${NC}"
+  WARNINGS=$((WARNINGS + 1))
+fi
+
+echo ""
+
+# ---------------------------------------------------
+# SUMMARY
+# ---------------------------------------------------
+echo -e "${BOLD}===================================================${NC}"
+if [ "$ERRORS" -gt 0 ]; then
+  echo -e "${RED}BLOCKED: $ERRORS error(s), $WARNINGS warning(s)${NC}"
+  echo -e "${RED}Fix errors before pushing.${NC}"
+  exit 1
+elif [ "$WARNINGS" -gt 0 ]; then
+  echo -e "${YELLOW}PASS with $WARNINGS warning(s) ($SKIPPED gate(s) skipped)${NC}"
+  echo -e "${YELLOW}Review warnings, then: git push${NC}"
+  exit 0
+else
+  echo -e "${GREEN}ALL GATES PASSED ($SKIPPED skipped)${NC}"
+  echo -e "${GREEN}Safe to push: git push${NC}"
+  exit 0
+fi

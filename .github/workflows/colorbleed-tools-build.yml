@@ -1,0 +1,422 @@
+###############################################################
+# Copyright (c) 2026 David H Hoyt LLC
+#
+# Intent: build and test colorbleed tools
+#
+# Last Updated: 21-OCT-2026 by David Hoyt
+###############################################################
+
+name: ColorBleed Tools Build
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'colorbleed_tools/**'
+      - '.github/agents/crash-triage.agent.md'
+      - '.github/instructions/colorbleed_tools.instructions.md'
+      - '.github/prompts/cooperative-development.prompt.md'
+      - '.github/prompts/tiff-icc-colorbleed.prompt.md'
+      - '.github/scripts/colorbleed-crosscheck.sh'
+      - '.github/skills/icc-crash-triage/SKILL.md'
+      - '.github/skills/icc-security-analysis/SKILL.md'
+      - '.github/workflows/colorbleed-tools-build.yml'
+      - 'docs/LOCAL_MACOS_ARM64_ONBOARDING.md'
+  pull_request:
+    paths:
+      - 'colorbleed_tools/**'
+      - '.github/agents/crash-triage.agent.md'
+      - '.github/instructions/colorbleed_tools.instructions.md'
+      - '.github/prompts/cooperative-development.prompt.md'
+      - '.github/prompts/tiff-icc-colorbleed.prompt.md'
+      - '.github/scripts/colorbleed-crosscheck.sh'
+      - '.github/skills/icc-crash-triage/SKILL.md'
+      - '.github/skills/icc-security-analysis/SKILL.md'
+      - '.github/workflows/colorbleed-tools-build.yml'
+      - 'docs/LOCAL_MACOS_ARM64_ONBOARDING.md'
+
+jobs:
+  linux:
+    name: "Linux ${{ matrix.compiler }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        uses: ./.github/actions/setup-build-env  # zizmor: ignore[self-repository]
+        with:
+          preset: 'colorbleed'
+          extra-packages: 'libxml2 libwxgtk3.2-dev wx-common jq'
+
+      - name: Set Compiler
+        env:
+          BASH_ENV: /dev/null
+          MATRIX_COMPILER: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          if [ "$MATRIX_COMPILER" = "gcc" ]; then
+            echo "CC=gcc" >> "$GITHUB_ENV"
+            echo "CXX=g++" >> "$GITHUB_ENV"
+          else
+            echo "CC=clang-18" >> "$GITHUB_ENV"
+            echo "CXX=clang++-18" >> "$GITHUB_ENV"
+          fi
+
+      - name: Print Compiler Version
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          source .github/scripts/sanitize-sed.sh 2>/dev/null || true
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          sanitize_line "Compiler Version:" >> "$GITHUB_STEP_SUMMARY"
+          sanitize_codeblock "$($CC --version 2>&1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          cd colorbleed_tools
+          make setup
+          make test
+
+      - name: Run ColorBleed Round-Trip QA
+        env:
+          BASH_ENV: /dev/null
+          COLORBLEED_STRICT_SANITIZERS: "1"
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          cd colorbleed_tools
+          make qa
+
+      - name: Test iccDumpAll and iccDiagnosticLoad
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+
+          source .github/scripts/sanitize-sed.sh 2>/dev/null || true
+
+          LOGDIR="$GITHUB_WORKSPACE/colorbleed_tools/tool-test-logs"
+          mkdir -p "$LOGDIR"
+
+          # Collect candidate profiles from test-profiles/ and iccDEV/Testing/
+          mapfile -t PROFILES < <(
+            find test-profiles/ -maxdepth 1 -name '*.icc' \
+              -size +128c -size -2M 2>/dev/null | sort
+          )
+          if [ -d colorbleed_tools/iccDEV/Testing ]; then
+            while IFS= read -r p; do
+              PROFILES+=("$p")
+            done < <(
+              find colorbleed_tools/iccDEV/Testing -maxdepth 1 -name '*.icc' \
+                -size +128c -size -2M 2>/dev/null | sort
+            )
+          fi
+
+          if [ "${#PROFILES[@]}" -lt 2 ]; then
+            echo "::error::Need at least 2 test profiles, found ${#PROFILES[@]}"
+            exit 1
+          fi
+
+          # Pick 2 random profiles using RANDOM
+          idx1=$((RANDOM % ${#PROFILES[@]}))
+          idx2=$(( (idx1 + 1 + RANDOM % (${#PROFILES[@]} - 1)) % ${#PROFILES[@]} ))
+          SELECTED=("${PROFILES[$idx1]}" "${PROFILES[$idx2]}")
+
+          TOOL_DIR="$GITHUB_WORKSPACE/colorbleed_tools"
+          PASS=0
+          FAIL=0
+          RESULTS=""
+
+          for profile in "${SELECTED[@]}"; do
+            pname="$(basename "$profile" .icc)"
+
+            # ---- iccDumpAll tests ----
+            for mode in "" "--diag" "--read" "--diag --read" "-v"; do
+              label="iccDumpAll ${mode:-default}"
+              slug="${mode// /-}"
+              slug="${slug:-default}"
+              logfile="$LOGDIR/dumpall-${pname}-${slug}.log"
+
+              echo "--- $label on $pname ---"
+              rc=0
+              if [ "$slug" = "-v" ]; then
+                timeout 30 "$TOOL_DIR/iccDumpAll" -v "$profile" ALL \
+                  > "$logfile" 2>&1 || rc=$?
+              else
+                mode_args=()
+                if [ -n "$mode" ]; then
+                  read -r -a mode_args <<< "$mode"
+                fi
+                timeout 30 "$TOOL_DIR/iccDumpAll" "${mode_args[@]}" "$profile" ALL \
+                  > "$logfile" 2>&1 || rc=$?
+              fi
+
+              lines=$(wc -l < "$logfile")
+              bytes=$(stat -c%s "$logfile" 2>/dev/null || echo 0)
+              if [ "$rc" -eq 0 ]; then
+                PASS=$((PASS + 1))
+                RESULTS="${RESULTS}| $label | $pname | 0 | $lines | $bytes |\n"
+              else
+                FAIL=$((FAIL + 1))
+                RESULTS="${RESULTS}| $label | $pname | $rc | $lines | $bytes |\n"
+              fi
+            done
+
+            # ---- iccDiagnosticLoad tests ----
+            for mode in "--raw" "--compare" "--trace" "--dump" "--all"; do
+              label="iccDiagnosticLoad $mode"
+              logfile="$LOGDIR/diagload-${pname}-${mode#--}.log"
+
+              echo "--- $label on $pname ---"
+              rc=0
+              timeout 30 "$TOOL_DIR/iccDiagnosticLoad" "$mode" "$profile" \
+                > "$logfile" 2>&1 || rc=$?
+
+              lines=$(wc -l < "$logfile")
+              bytes=$(stat -c%s "$logfile" 2>/dev/null || echo 0)
+              if [ "$rc" -eq 0 ]; then
+                PASS=$((PASS + 1))
+                RESULTS="${RESULTS}| $label | $pname | 0 | $lines | $bytes |\n"
+              else
+                FAIL=$((FAIL + 1))
+                RESULTS="${RESULTS}| $label | $pname | $rc | $lines | $bytes |\n"
+              fi
+            done
+          done
+
+          # Write compact summary table
+          summary=$(
+            echo "### iccDumpAll and iccDiagnosticLoad Test Results"
+            echo ""
+            echo "**Selected profiles:**"
+            for p in "${SELECTED[@]}"; do
+              echo "- \`$(basename "$p")\` ($(stat -c%s "$p" 2>/dev/null || echo '?') bytes)"
+            done
+            echo ""
+            echo "| Tool + Mode | Profile | Exit | Lines | Bytes |"
+            echo "|---|---|---|---|---|"
+            printf '%b' "$RESULTS"
+            echo ""
+            echo "**Results: $PASS passed, $FAIL non-zero exit**"
+            echo ""
+            echo "> Full tool output is in the uploaded \`tool-test-logs/\` artifact."
+          )
+          printf '%s\n' "$(sanitize_print "$summary")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate Checksums
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          cd colorbleed_tools
+          sha256sum iccToXml_unsafe iccFromXml_unsafe \
+            iccToJson_unsafe iccFromJson_unsafe iccTiffDump_unsafe \
+            iccJpegDump_unsafe iccDumpAll iccDiagnosticLoad > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0 (node24)
+        with:
+          name: colorbleed-linux-${{ matrix.compiler }}
+          path: |
+            colorbleed_tools/iccToXml_unsafe
+            colorbleed_tools/iccFromXml_unsafe
+            colorbleed_tools/iccToJson_unsafe
+            colorbleed_tools/iccFromJson_unsafe
+            colorbleed_tools/iccTiffDump_unsafe
+            colorbleed_tools/iccJpegDump_unsafe
+            colorbleed_tools/iccDumpAll
+            colorbleed_tools/iccDiagnosticLoad
+            colorbleed_tools/SHA256SUMS
+            colorbleed_tools/test.xml
+            colorbleed_tools/test.json
+            colorbleed_tools/roundtrip.icc
+            colorbleed_tools/roundtrip-json.icc
+            colorbleed_tools/test-tiff-profile.icc
+            colorbleed_tools/tool-test-logs/
+
+      - name: Summary Report
+        if: always()
+        env:
+          BASH_ENV: /dev/null
+          MATRIX_COMPILER: ${{ matrix.compiler }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/sanitize-sed.sh 2>/dev/null || true
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          case "$JOB_STATUS" in
+            success) STATUS_LINE="[OK] Build complete" ;;
+            cancelled) STATUS_LINE="[CANCELLED] Job cancelled" ;;
+            *) STATUS_LINE="[FAIL] Build or tests failed" ;;
+          esac
+          summary=$(
+            echo "### Linux Build Summary ($MATRIX_COMPILER)"
+            echo "- Compiler: $MATRIX_COMPILER"
+            echo "- Status: $STATUS_LINE"
+            echo ""
+            echo "#### Artifacts"
+            echo '```'
+            for artifact in \
+              colorbleed_tools/iccToXml_unsafe \
+              colorbleed_tools/iccFromXml_unsafe \
+              colorbleed_tools/iccTiffDump_unsafe \
+              colorbleed_tools/iccJpegDump_unsafe \
+              colorbleed_tools/iccDumpAll \
+              colorbleed_tools/iccDiagnosticLoad; do
+              if [ -e "$artifact" ]; then
+                stat -c '%A %U %G %s %n' "$artifact"
+              else
+                printf 'missing: %s\n' "$artifact"
+              fi
+            done
+            echo '```'
+            echo ""
+            echo "#### SHA256 Checksums"
+            echo '```'
+            if [ -f colorbleed_tools/SHA256SUMS ]; then
+              cat colorbleed_tools/SHA256SUMS
+            else
+              echo "SHA256SUMS unavailable"
+            fi
+            echo '```'
+          )
+          printf '%s\n' "$(sanitize_print "$summary")" >> "$GITHUB_STEP_SUMMARY"
+
+  tiff-regression:
+    name: TIFF evidence and extraction regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash --noprofile --norc {0}
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        uses: ./.github/actions/setup-build-env  # zizmor: ignore[self-repository]
+        with:
+          preset: 'colorbleed'
+          extra-packages: 'libxml2 libwxgtk3.2-dev wx-common jq'
+
+      - name: Build all ColorBleed configurations
+        env:
+          BASH_ENV: /dev/null
+          CC: clang-18
+          CXX: clang++-18
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          colorbleed_tools/build.sh all
+
+      - name: Run deterministic container and cross-configuration QA
+        env:
+          BASH_ENV: /dev/null
+          COLORBLEED_STRICT_SANITIZERS: "1"
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          export COLORBLEED_TIFF_TEST_OUTDIR="$RUNNER_TEMP/colorbleed-tiff-regression"
+          export COLORBLEED_JPEG_TEST_OUTDIR="$RUNNER_TEMP/colorbleed-jpeg-regression"
+          colorbleed_tools/test-icctiffdump-unsafe.sh
+          colorbleed_tools/test-iccjpegdump-unsafe.sh
+          .github/scripts/colorbleed-crosscheck.sh \
+            colorbleed_tools/iccDEV/Testing/sRGB_v4_ICC_preference.icc \
+            colorbleed_tools/test-data/1x1-rgb8--sRGB_v4_ICC_preference.tiff \
+            "$RUNNER_TEMP/colorbleed-crosscheck"
+
+      - name: Upload TIFF evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0 (node24)
+        with:
+          name: colorbleed-tiff-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/colorbleed-tiff-regression/
+            ${{ runner.temp }}/colorbleed-crosscheck/
+
+      - name: Upload JPEG evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0 (node24)
+        with:
+          name: colorbleed-jpeg-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/colorbleed-jpeg-regression/
+
+      - name: Summarize container regression
+        if: always()
+        env:
+          BASH_ENV: /dev/null
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          git config --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global credential.helper ""
+          unset GITHUB_TOKEN || true
+          source .github/scripts/sanitize-sed.sh
+          {
+            sanitize_print "### ColorBleed container extraction regression"
+            sanitize_print ""
+            sanitize_print "Status: $JOB_STATUS"
+            if [ -f "$RUNNER_TEMP/colorbleed-tiff-regression/results.tsv" ]; then
+              sanitize_print ""
+              sanitize_print '```text'
+              while IFS= read -r line; do
+                sanitize_print "$line"
+              done < "$RUNNER_TEMP/colorbleed-tiff-regression/results.tsv"
+              sanitize_print '```'
+            fi
+            if [ -f "$RUNNER_TEMP/colorbleed-jpeg-regression/results.tsv" ]; then
+              sanitize_print ""
+              sanitize_print '```text'
+              while IFS= read -r line; do
+                sanitize_print "$line"
+              done < "$RUNNER_TEMP/colorbleed-jpeg-regression/results.tsv"
+              sanitize_print '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY" # sanitize_print output only

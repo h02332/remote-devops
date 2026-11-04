@@ -1,0 +1,401 @@
+# iccApplyNamedCmm
+
+Applies ICC color transforms to color data files using the Named Color Management Module (CMM).
+Supports chained profile transforms, multiple encoding formats, and interpolation methods.
+
+## Usage
+
+```
+iccApplyNamedCmm [-exportcfg config_path | -exportcfganddata config_path] \
+  [-debugcalc] data_file_path \
+  final_data_encoding[:FmtPrecision[:FmtDigits]] interpolation \
+  [[-ENV:SIG value] profile_file_path Rendering_intent \
+  [-PCC connection_conditions_path]]...
+```
+
+Or with a JSON config file:
+
+```
+iccApplyNamedCmm -cfg config_file_path
+```
+
+`-cfg` must be the only option and accepts exactly one path. In positional mode,
+an export option must precede `-debugcalc`. Each `-ENV:SIG` belongs before its
+profile, each `-PCC` belongs after that profile and intent, and `SIG` must contain
+exactly four characters.
+
+### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `-debugcalc` | Optional | Enable calculator debugging output |
+| `data_file_path` | **Required** | Path to color data file |
+| `final_data_encoding` | **Required** | Output encoding (see table below) |
+| `interpolation` | **Required** | 0=Linear, 1=Tetrahedral |
+| `profile_file_path` | **Required** | Path to ICC profile |
+| `Rendering_intent` | **Required** | 0=Perceptual, 1=Relative, 2=Saturation, 3=Absolute |
+| `-PCC path` | Optional | Profile Connection Conditions file |
+| `-ENV:SIG value` | Optional | Four-character environment signature and value for the next transform |
+| `-exportcfg path` | Optional | Export the parsed configuration before applying it |
+| `-exportcfganddata path` | Optional | Export configuration with input data embedded |
+| `-cfg path` | Optional | JSON configuration file |
+
+### Encoding Values
+
+| Code | Name | Description |
+|------|------|-------------|
+| 0 | icEncodeValue | Converts to/from Lab encoding when samples=3 |
+| 1 | icEncodePercent | Percentage values (0-100) |
+| 2 | icEncodeUnitFloat | Unit float (0.0-1.0, may clip) |
+| 3 | icEncodeFloat | Unclamped float values |
+| 4 | icEncode8Bit | 8-bit integer (0-255) |
+| 5 | icEncode16Bit | 16-bit integer (0-65535) |
+| 6 | icEncode16BitV2 | 16-bit v2 encoding |
+
+Encoding support depends on the destination color space. In particular, an XYZ
+destination rejects encoding 4 and a Lab destination rejects encoding 1. A
+profile chain that ends in RGB can use encoding 4.
+
+### Encoding Precision Format
+
+`encoding:precision:digits` - e.g., `0:8:12` means encoding=0, 8 digits after decimal, 12 total.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Graceful parse, profile, encoding, or transform failure |
+
+## Data File Format
+
+```
+'RGB '  ; Data Color Space (4-char signature in quotes)
+icEncodeValue  ; Encoding enum name
+
+255 255 255
+0 0 0
+128 128 128
+255 0 0
+0 255 0
+0 0 255
+```
+
+- Line 1: 4-character ICC color space signature in single quotes, semicolon comment
+- Line 2: Encoding enum name, semicolon comment
+- Blank line separator
+- Data: space-separated channel values, one sample per line
+
+## Examples
+
+### All encoding types with sRGB
+
+```bash
+export LD_LIBRARY_PATH=iccDEV/Build/IccProfLib:iccDEV/Build/IccXML
+
+# Encoding 0: icEncodeValue
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 0 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# Encoding 1: icEncodePercent
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 1 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# Encoding 2: icEncodeUnitFloat
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 2 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# Encoding 3: icEncodeFloat
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 3 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# Encoding 4: icEncode8Bit (second profile makes RGB the destination)
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 4 0 \
+  test-profiles/sRGB_D65_MAT.icc 1 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# Encoding 5: icEncode16Bit
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 5 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# Encoding 6: icEncode16BitV2
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 6 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# Encoding with precision format (8 decimal digits, 12 total)
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 0:8:12 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+```
+
+> **Note**: The one-profile sRGB example ends in XYZ, which rejects encoding 4.
+> Add a second sRGB profile so the chain ends in RGB when testing 8-bit output.
+
+### Tetrahedral interpolation
+
+```bash
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 0 1 \
+  test-profiles/sRGB_D65_MAT.icc 1
+```
+
+### Different rendering intents
+
+```bash
+# Perceptual
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 0 0 \
+  test-profiles/sRGB_D65_MAT.icc 0
+
+# Saturation
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 0 0 \
+  test-profiles/sRGB_D65_MAT.icc 2
+
+# Absolute Colorimetric
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 0 0 \
+  test-profiles/sRGB_D65_MAT.icc 3
+```
+
+### Packed `Rendering_intent` Encoding
+
+The `Rendering_intent` argument supports an extended packed encoding that controls
+transform behavior beyond the basic 0-3 intent values. The tool decodes the integer
+value using successive modular arithmetic:
+
+```
+Rendering_intent = [useHToS * 100000] + [useV5SubProfile * 10000]
+                 + [adjustPcsLuminance * 1000] + [nType * 10] + [intent]
+```
+
+| Digit Position | Field | Values |
+|----------------|-------|--------|
+| 100000s | useHToS | 0=off, 1=on (then mod 100000) |
+| 10000s | useV5SubProfile | 0=off, 1=on (then mod 10000) |
+| 1000s | adjustPcsLuminance | 0=off, 1=on (then mod 1000) |
+| 10s | nType | 0-9 (transform type selector) |
+| 1s | intent | 0-3 (rendering intent) |
+
+**nType Values:**
+
+| nType | Effect | xformType |
+|-------|--------|-----------|
+| 0 | Default | icXformLutColor |
+| 1 | Disable D2Bx/B2Dx | icXformLutColor + useD2BxB2DxTags=false |
+| 2 | Preview | icXformLutPreview |
+| 3 | Gamut check | icXformLutGamut |
+| 4 | BPC (Black Point Compensation) | icXformLutColor + BPC hint |
+| 5 | BRDF/MCS Parameter | icXformLutBRDFMcsParam |
+| 6 | MCS | icXformLutMCS |
+| 7-9 | Passthrough | (icXformLutType)nType |
+
+**Examples:**
+
+```bash
+# nType=0, intent=1 (Relative Colorimetric, default transform)
+iccApplyNamedCmm data.txt 0 0 profile.icc 1
+
+# nType=4, intent=0 (Perceptual with BPC)
+iccApplyNamedCmm data.txt 0 0 profile.icc 40
+
+# nType=5, intent=0 (BRDF/MCS Parameter transform)
+iccApplyNamedCmm data.txt 0 0 profile.icc 50
+
+# adjustPcsLuminance + nType=0 + intent=1
+iccApplyNamedCmm data.txt 0 0 profile.icc 1001
+
+# useV5SubProfile + nType=0 + intent=1
+iccApplyNamedCmm data.txt 0 0 profile.icc 10001
+```
+
+> **Source**: `CIccCfgProfileSequence::fromArgs()` in `IccCmmConfig.cpp`.
+
+### Chained profile transforms
+
+```bash
+# sRGB -> sRGB (identity check with chained transforms)
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-8bit.txt 0 0 \
+  test-profiles/sRGB_D65_MAT.icc 1 \
+  test-profiles/sRGB_D65_MAT.icc 1
+```
+
+### CMYK profile with CMYK data
+
+```bash
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-cmyk-percent.txt 0 0 \
+  test-profiles/CMYK-3DLUTs2.icc 1
+```
+
+> **Note**: CMYK->Lab transforms output Lab values. Use encoding 0 (icEncodeValue) or
+> 3 (icEncodeFloat); encoding 1 (icEncodePercent) exits 1 for this combination.
+
+### Float and 16-bit data formats
+
+```bash
+# Float data
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-float.txt 3 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+
+# 16-bit data
+iccApplyNamedCmm docs/iccDEV/Tools/test-data/test-data-rgb-16bit.txt 5 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+```
+
+### Using upstream test data
+
+```bash
+# sRGB calculator test data (from iccDEV Testing/)
+iccApplyNamedCmm iccDEV/Testing/Calc/srgbCalcTest.txt 0 0 \
+  test-profiles/sRGB_D65_MAT.icc 1
+```
+
+## Test Data Files
+
+Provided in `docs/iccDEV/Tools/test-data/`:
+
+| File | Color Space | Encoding | Samples |
+|------|-------------|----------|---------|
+| `test-data-rgb-8bit.txt` | RGB | 8-bit (0-255) | 11 (white, black, grays, primaries, secondaries) |
+| `test-data-rgb-16bit.txt` | RGB | 16-bit (0-65535) | 6 |
+| `test-data-rgb-float.txt` | RGB | Float (0.0-1.0) | 8 |
+| `test-data-cmyk-percent.txt` | CMYK | Percent (0-100) | 10 |
+| `test-data-lab-float.txt` | Lab | Float | 9 |
+
+## JSON Configuration (`-cfg`)
+
+Instead of command-line arguments, iccApplyNamedCmm accepts a JSON configuration file:
+
+```bash
+iccApplyNamedCmm -cfg docs/Testing/json-configs/applynamedcmm-srgb-basic.json
+```
+
+### JSON Schema
+
+```json
+{
+  "dataFiles": {
+    "srcType": "colorData",       // "colorData" | "legacy" | "it8"
+    "srcFile": "",                // Path to external data file (when srcType != "colorData")
+    "dstType": "colorData",       // "colorData" | "legacy" | "it8"
+    "dstFile": "",                // Path to output file (empty = stdout)
+    "dstEncoding": "float",       // See encoding strings table below
+    "dstPrecision": 4,            // Decimal places in output
+    "dstDigits": 9                // Total digits in output
+  },
+  "profileSequence": [
+    {
+      "iccFile": "path/to/profile.icc",
+      "intent": 1,                // 0=Perceptual, 1=Relative, 2=Saturation, 3=Absolute
+      "interpolation": "tetrahedral",  // "linear" | "tetrahedral"
+      "useBPC": false,            // Black Point Compensation
+      "useD2BxB2Dx": true,        // Use DToB/BToD tags if available
+      "adjustPcsLuminance": false, // Adjust PCS luminance
+      "useV5SubProfile": false,   // Use v5 sub-profile
+      "useHToS": false,           // Use HToS transform
+      "pccFile": "",              // Profile Connection Conditions file
+      "iccEnvVars": [],           // Environment variables [{name, value}]
+      "pccEnvVars": []            // PCC environment variables [{name, value}]
+    }
+  ],
+  "colorData": {
+    "space": "RGB ",              // 4-char ICC color space signature (trailing space)
+    "encoding": "float",          // Input data encoding string
+    "data": [
+      { "values": [1.0, 1.0, 1.0] },
+      { "values": [0.0, 0.0, 0.0] }
+    ]
+  }
+}
+```
+
+### JSON Encoding Strings (CRITICAL)
+
+The JSON parser requires **string** encoding values, NOT numeric enum integers.
+Numeric values (0, 1, 2...) are silently rejected as `icEncodeUnknown`.
+
+**Color data encoding** (`colorData.encoding`, `dataFiles.dstEncoding`):
+
+| String | Enum | Range |
+|--------|------|-------|
+| `"value"` | icEncodeValue | Normalized (Lab conversion for 3-ch) |
+| `"percent"` | icEncodePercent | 0-100 |
+| `"unitFloat"` | icEncodeUnitFloat | 0.0-1.0 (clips) |
+| `"float"` | icEncodeFloat | Unbounded |
+| `"8Bit"` | icEncode8Bit | 0-255 |
+| `"16Bit"` | icEncode16Bit | 0-65535 |
+| `"16BitV2"` | icEncode16BitV2 | 0-65535 |
+
+**Data type** (`dataFiles.srcType`, `dataFiles.dstType`):
+
+| String | Enum |
+|--------|------|
+| `"colorData"` | icCfgColorData (inline JSON data) |
+| `"legacy"` | icCfgLegacy (external file) |
+| `"it8"` | icCfgIt8 (IT8 file) |
+
+### CLI Arguments to JSON Field Mapping
+
+| CLI Argument | JSON Path |
+|-------------|-----------|
+| `data_file_path` | `dataFiles.srcFile` (or inline `colorData`) |
+| `final_data_encoding` | `dataFiles.dstEncoding` |
+| `interpolation` | `profileSequence[].interpolation` |
+| `profile_file_path` | `profileSequence[].iccFile` |
+| `Rendering_intent` | `profileSequence[].intent` |
+| `-debugcalc` | `dataFiles.debugCalc` (bool) |
+| `-PCC path` | `profileSequence[].pccFile` |
+| `-ENV:SIG value` | `profileSequence[].iccEnvVars` |
+| `FmtPrecision` | `dataFiles.dstPrecision` |
+| `FmtDigits` | `dataFiles.dstDigits` |
+
+### JSON Config Examples
+
+Example configs are in `docs/Testing/json-configs/`:
+
+| Config | Description |
+|--------|-------------|
+| `applynamedcmm-srgb-basic.json` | Single sRGB profile, float encoding, 6 RGB samples |
+| `applynamedcmm-chain-two-profiles.json` | Two sRGB profiles chained |
+| `applynamedcmm-three-profile-chain.json` | Three profiles with intents 0, 1, 2 |
+| `applynamedcmm-debugcalc-bpc.json` | debugCalc + BPC, 8Bit encoding |
+| `applynamedcmm-8bit-encoding.json` | 8-bit input encoding |
+| `applynamedcmm-16bit-encoding.json` | 16-bit input encoding |
+| `applynamedcmm-output-to-file.json` | Output to dstFile |
+
+### JSON Output
+
+When the tool writes results, the output JSON uses `colorData` structure:
+
+```json
+{
+  "colorData": {
+    "data": [{ "v": [0.9642, 1.0, 0.8249] }],
+    "encoding": "float",
+    "space": "XYZ ",
+    "srcEncoding": "float",
+    "srcSpace": "RGB "
+  }
+}
+```
+
+### JSON Test Suite
+
+The automated suite covers valid configs, malformed JSON, edge cases, intents,
+encodings, profile variants, and crash profiles.
+See `docs/Testing/README.md` and `docs/Testing/test-json-tools.sh`.
+
+## Known Limitations
+
+- Encoding validity depends on the destination color space; unsupported choices exit 1
+- Chained transforms with 2+ profiles may trigger upstream memory leak
+  (`CIccPcsStepScale::Mult` at IccCmm.cpp:4325 - 24-byte leak, upstream)
+- JSON `toJson()` serialization bugs (dstDigits typo, iccFile/iccProfile mismatch,
+  icInterpNames array) were fixed upstream in PRs #692, #739 (v2.3.1.5)
+
+## Related Tools
+
+- [iccApplyProfiles](../iccApplyProfiles/) - Apply transforms to TIFF images
+- [iccApplySearch](../iccApplySearch/) - Search optimal transforms between profiles
+- [iccApplyToLink](../iccApplyToLink/) - Create DeviceLink from profile chain
+- CFL fuzzer: `icc_applynamedcmm_fuzzer` - Fuzz the Named CMM
+
+## Version
+
+Run `iccApplyNamedCmm` without arguments to print the linked IccProfLib and
+IccLibConnect versions for the active build.

@@ -1,0 +1,258 @@
+# Hoyt's ColorBleed Tooling
+
+Last Updated: 2026-10-21 UTC by David Hoyt
+
+ICC Color Profile research tools to load & store unsafe file representations.
+
+## Tools
+
+| Binary | Description |
+|--------|-------------|
+| `iccToXml_unsafe` | ICC Profile -> XML (unsafe load) |
+| `iccFromXml_unsafe` | XML -> ICC Profile blob (unsafe store) |
+| `iccToJson_unsafe` | ICC Profile -> JSON (unsafe load; `-sort` is disabled in this wrapper pending sanitizer hardening) |
+| `iccFromJson_unsafe` | JSON -> ICC Profile blob (unsafe store) |
+| `iccTiffDump_unsafe` | Sandboxed TIFF dump and byte-exact embedded ICC extraction |
+| `iccJpegDump_unsafe` | Sandboxed JPEG APP2 inspection and byte-exact embedded ICC extraction |
+| `iccDumpAll` | Enhanced ICC profile dump with full v5/iccMAX MPE element detail |
+| `iccDiagnosticLoad` | Deep diagnostic ICC profile loader with IO tracing (build from source) |
+
+### iccDumpAll
+
+Enhanced replacement for upstream `iccDumpProfile`. Core behavior is function-identical
+to the upstream tool with layered enhancements for security research:
+
+- MPE element type signatures shown per PROCESS_ELEMENT
+- v5 profile summary section (spectral, BRDF, MCS tags)
+- Element chain I/O channel flow visualization
+- Late-binding spectral element identification
+- `--diag` mode: file stat, sanitizer config, tag load tracking
+- `--read` mode: ReadIccProfile (eager) vs OpenIccProfile (lazy)
+
+```
+Usage: iccDumpAll {--diag} {--read} {-v} {int} profile {tagId/"ALL"}
+```
+
+### iccDiagnosticLoad
+
+Deep diagnostic loader that traces every IO operation during profile loading.
+Designed for CFL patch PoC development and A/B testing.
+
+```
+Usage: iccDiagnosticLoad [options] <profile.icc>
+
+Options:
+  --raw      Raw binary analysis + hex dump (no library)
+  --compare  A/B: OpenIccProfile vs ReadIccProfile vs ValidateIccProfile
+  --trace    Full IO position trace for each tag load
+  --dump     Library-based tag dump (like iccDumpProfile)
+  --all      Enable all modes
+```
+
+Note: `iccDiagnosticLoad` is not included in the default `make` targets.
+Build manually: `make iccDiagnosticLoad` or compile directly against iccDEV.
+
+### iccTiffDump_unsafe
+
+Reads TIFF directories with libtiff, logs the TIFF and ICC phases, and exercises
+the vanilla iccDEV profile parser under the ColorBleed resource sandbox. When an
+output path is supplied, the first embedded profile is written to a sibling
+temporary file and atomically published before iccDEV parsing. Validation and
+parser failures do not suppress the complete forensic artifact. Existing output
+files are refused.
+
+```
+Usage: iccTiffDump_unsafe [--verbose|--summary|--evidence-json] input.tif [embedded.icc]
+```
+
+The default `--verbose` mode emits escaped TIFF metadata and a bounded ICC
+tag dump. `--summary` prints one compact result line. `--evidence-json` reserves
+stdout for one `colorbleed-tiff-evidence/v1` object and sends diagnostic text to
+stderr. Automation must use the JSON mode instead of scraping presentation text.
+
+Evidence records the selected TIFF directory, directory and embedded-profile
+counts, embedded byte length and SHA-256, extraction completion, ICC open and
+recursive-tag-load states, validation status, libtiff warning/error counts, and
+the final sandbox result. The tool reports every ICC-bearing directory and uses
+the first for diagnostics and extraction.
+
+Limits are 4 GiB virtual memory outside ASan, 60 CPU seconds, 30 wall seconds,
+512 MiB output, 256 TIFF directories, 20 libtiff warning/error messages of each
+kind, and a 512 MiB embedded ICC field.
+Tests may lower the ICC field ceiling with `COLORBLEED_MAX_ICC_BYTES`; invalid or
+higher values are ignored.
+
+#### TIFF exit and evidence contract
+
+| Exit | Meaning | Artifact contract |
+|---:|---|---|
+| 0 | Clean completion, including inspection of a TIFF with no ICC when no extraction was requested | Extracted ICC is complete when `icc.extracted` is true |
+| 2 | libtiff could not open the resolved input | No output |
+| 3 | Extraction requested but no embedded ICC exists | No output |
+| 4 | Embedded bytes were preserved but iccDEV rejected the ICC header | Complete output when requested |
+| 5 | Embedded bytes were preserved but recursive tag loading failed or hit its bound | Complete output when requested |
+| 6 | Embedded bytes were preserved but validation was noncompliant or critical | Complete output when requested |
+| 7 | Atomic extraction could not be published, including an existing destination | Existing destination remains unchanged |
+| 8 | TIFF directory traversal failed | No newly published output unless extraction had already completed |
+| 9 | Embedded ICC exceeds the explicit byte ceiling | No output |
+| 64 | Invalid command or output path | No output |
+| 66 | Input path could not be resolved | No output |
+| 70 | Shared evidence allocation failed | No output |
+| 86 | Strict sanitizer finding | Treat as a finding even though it is below 128 |
+| 99 | C++ exception caught by the sandbox | Soft wrapper failure; inspect stderr |
+| 124 | External `timeout` command expired | Harness timeout, not a tool exit |
+| 128+ | Signal-derived sandbox status | Crash or resource-limit termination |
+
+Always interpret the JSON `sandbox` object before the generic numeric ranges.
+In particular, exit 86 is a sanitizer finding, while exits 4-6 are forensic
+soft failures with intentionally retained bytes.
+
+### iccJpegDump_unsafe
+
+Extracts the full ICC payload from JPEG `ICC_PROFILE` APP2 markers, writes it
+atomically, and exercises the vanilla iccDEV parser under the ColorBleed
+resource sandbox. Strict mode requires the ICC chunk sequence and count fields
+to be valid. The default forensic mode falls back to physical APP2 marker order
+when metadata is malformed, preserving recoverable bytes for investigation.
+Existing output files are refused.
+
+```
+Usage: iccJpegDump_unsafe [--forensic|--strict] input.jpg output.icc
+```
+
+Exit 0 means strict extraction and ICC inspection completed. Exit 10 means a
+complete artifact was recovered in forensic physical-marker order after strict
+chunk metadata validation failed. Exits 4-6 retain the complete extracted
+artifact but report ICC header, recursive tag-load, or validation failure.
+Exit 8 is strict chunk metadata rejection, exit 3 means no ICC APP2 marker was
+found, and exit 7 means the artifact could not be atomically published.
+
+## Use Cases
+- Fuzzing
+- [Latest Binary](https://github.com/xsscx/research/actions/workflows/colorbleed-tools-build.yml)
+
+## Workflow
+
+- Create Images with https://github.com/xsscx/xnuimagetools
+- Fuzz Images with https://github.com/xsscx/xnuimagefuzzer
+- Create ICC Profiles with these ColorBleed Tools
+- Join the ICC Profile & Image
+- Interact with:
+   - iMessage
+   - Outlook
+   - Phone
+   - Desktops
+   - TVs
+
+## Requirements
+
+### Ubuntu/Debian
+```
+sudo apt install -y build-essential cmake clang clang-tools \
+  libxml2-dev libtiff-dev libssl-dev zlib1g-dev liblzma-dev pkg-config git jq python3
+```
+
+## Build
+
+### Quick Start
+```
+cd colorbleed_tools
+make setup       # clone vanilla iccDEV, build static libs
+make test        # build tools and run tests
+```
+
+### Unsafe JSON Round Trip
+```
+./iccToJson_unsafe ../test-profiles/sRGB_D65_MAT.icc /tmp/profile.json
+./iccFromJson_unsafe /tmp/profile.json /tmp/profile-json.icc
+./iccTiffDump_unsafe --evidence-json \
+  test-data/1x1-rgb8--sRGB_v4_ICC_preference.tiff /tmp/embedded.icc
+./iccJpegDump_unsafe --forensic input.jpg /tmp/embedded-jpeg.icc
+```
+
+TIFF extraction happens before ICC parsing and validation. With upstream
+iccDEV `3e348201` or later, a deeply nested profile can be preserved exactly and
+then return exit 5 when bounded recursive tag loading stops. That is a soft
+parser failure with a forensic artifact, not a crash by itself.
+
+Do not use `-sort` with `iccToJson_unsafe` during ColorBleed QA. The wrapper
+rejects it with exit code 64 until that path is sanitizer-clean.
+
+### XML/JSON/TIFF/Blob QA
+```
+./qa-roundtrip-colorbleed.sh
+./test-icctiffdump-unsafe.sh
+./test-iccjpegdump-unsafe.sh
+COLORBLEED_STRICT_SANITIZERS=1 ./iccFromXml_unsafe input.xml /tmp/out.icc
+../.github/scripts/colorbleed-crosscheck.sh
+```
+
+The focused TIFF suite generates temporary positive and negative fixtures and
+checks release, debug, and sanitizer evidence, extraction, escaping, recursion,
+multiple-directory, destination, and size-limit behavior. The repository-level
+cross-check runs release, debug, and sanitizer tools,
+records XML/JSON return deltas, validates returned profiles, verifies TIFF
+extraction, and writes all generated artifacts and metrics under `/tmp`.
+The historical 2026-08-17 measured baseline is recorded in
+[`QA-REPORT-2026-08-17.md`](QA-REPORT-2026-08-17.md).
+
+The focused JPEG suite generates valid, malformed-sequence, and no-profile
+containers. It verifies byte-exact strict extraction, physical-order forensic
+recovery, strict rejection without an artifact, and sanitizer-clean execution.
+
+`qa-roundtrip-colorbleed.sh` runs ICC -> XML -> ICC -> XML, ICC -> JSON -> ICC
+-> XML, then `iccDumpAll` and `iccDiagnosticLoad` on the synthesized blob. It
+also dumps a checked-in TIFF, extracts its ICC profile, and verifies byte
+identity against the source profile fixture. It fails on sanitizer reports,
+sandbox crashes, abnormal exits, wall-time findings, or extraction drift.
+
+### Sanitizer Signal
+
+Sanitizer builds use `sanitizer-ignorelist.txt` at compile time and
+`silence.txt` at runtime to suppress known-benign libstdc++ template noise
+such as `bits/basic_string.tcc`, `bits/stl_bvector.h`, and
+`bits/stl_uninitialized.h`. Do not add iccDEV parser findings to those files
+unless the exact operation is proven well-defined and intentional.
+
+By default, sanitizer builds recover so a single run can expose multiple parser
+signals. Set `COLORBLEED_STRICT_SANITIZERS=1` when a reproducer or CI gate should
+exit immediately with code 86 and report `*** SANITIZER FINDING ***`.
+
+For ad hoc sanitizer reproductions, pass the runtime suppression file:
+
+```
+UBSAN_OPTIONS=print_stacktrace=1:suppressions=$PWD/silence.txt \
+  bin/sanitizer/iccFromJson_unsafe input.json /tmp/out.icc
+```
+
+### Individual Targets
+```
+make setup       # clone iccDEV + build libraries (one-time)
+make             # build unsafe ICC representation, TIFF, and JPEG tools
+make test        # build + run basic tests
+make clean       # remove binaries and test files
+make distclean   # remove everything including iccDEV clone
+make help        # show all targets
+```
+
+### Build
+
+```
+git clone https://github.com/xsscx/research.git
+cd research
+cd colorbleed_tools
+git clone https://github.com/InternationalColorConsortium/iccDEV.git
+cd iccDEV && cd Build && cmake Cmake && make -j32
+cd ../../ && make distclean && make setup &&  make -j32 all test
+...
+[OK] Basic tests complete
+```
+
+## CI Workflow
+
+https://github.com/xsscx/research/blob/main/.github/workflows/colorbleed-tools-build.yml
+
+## References
+- https://srd.cx/cve-2022-26730/
+- https://srd.cx/cve-2023-32443/
+- https://srd.cx/cve-2024-38427/

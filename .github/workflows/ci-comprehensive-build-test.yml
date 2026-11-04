@@ -1,0 +1,21 @@
+###############################################################
+# ci-comprehensive-build-test.yml
+#
+# Comprehensive iccDEV build and test matrix with fuzzer builds.
+# Thin caller of _build-matrix.yml callable workflow.
+###############################################################
+
+name: CI Comprehensive Build and Test
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-matrix:
+    uses: ./.github/workflows/_build-matrix.yml
+    with:
+      report-title: 'Comprehensive Build and Test Results'
+      artifact-prefix: 'comprehensive-build'

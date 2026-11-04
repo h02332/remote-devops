@@ -1,0 +1,162 @@
+---
+applyTo: "colorbleed_tools/**"
+---
+
+# colorbleed_tools - Path-Specific Instructions
+
+## What This Is
+
+Unsafe ICC representation and TIFF/JPEG extraction tools for mutation testing,
+profile generation, and forensic container analysis.
+Release/debug builds keep the real-world unsafe conversion surface, while the
+default clang build is sanitizer-instrumented for QA and crash attribution.
+
+## Build
+
+```bash
+cd colorbleed_tools && make setup && make
+```
+
+- `make setup`: clones iccDEV and builds the C++ library
+- `make`: compiles `iccToXml_unsafe`, `iccFromXml_unsafe`,
+  `iccToJson_unsafe`, `iccFromJson_unsafe`, `iccTiffDump_unsafe`, and
+  `iccJpegDump_unsafe`
+- `make qa`: runs the XML/JSON/TIFF/blob round-trip QA and focused JPEG suites
+- The TIFF QA fixture is
+  `colorbleed_tools/test-data/1x1-rgb8--sRGB_v4_ICC_preference.tiff`. Keep it
+  with the owning component so fresh CI checkouts can run byte-exact extraction
+  testing without depending on the ignored, nested `fuzz/` checkout.
+- Binaries: `colorbleed_tools/iccToXml_unsafe`,
+  `colorbleed_tools/iccFromXml_unsafe`, `colorbleed_tools/iccToJson_unsafe`,
+  `colorbleed_tools/iccFromJson_unsafe`, `colorbleed_tools/iccTiffDump_unsafe`,
+  `colorbleed_tools/iccJpegDump_unsafe`
+- These are intentionally unsafe wrappers around unpatched iccDEV parser code.
+
+## Purpose
+
+1. **ICC -> XML**: Convert binary ICC profiles to human-readable XML for inspection
+2. **XML -> ICC**: Reconstruct ICC profiles from XML (enables manual mutation testing)
+3. **ICC -> JSON**: Convert binary ICC profiles to IccJSON for structured mutation
+4. **JSON -> ICC**: Reconstruct ICC profiles from IccJSON
+5. **TIFF -> ICC**: Dump TIFF structure and preserve embedded ICC bytes for analysis
+6. **JPEG -> ICC**: Reassemble APP2 chunks and preserve embedded ICC bytes
+7. **Round-trip testing**: ICC -> XML/JSON -> ICC to verify parse/serialize fidelity
+8. **Crash reproduction**: Run release/debug builds for real-world behavior
+   checks, then sanitizer builds for attribution and regression gates.
+
+## Usage
+
+```bash
+# Convert ICC to XML
+./iccToXml_unsafe input.icc output.xml
+
+# Convert XML to ICC
+./iccFromXml_unsafe input.xml output.icc
+
+# Convert ICC to JSON
+./iccToJson_unsafe input.icc output.json
+
+# Convert JSON to ICC
+./iccFromJson_unsafe input.json output.icc
+
+# Dump TIFF structure, ICC diagnostics, and exact embedded profile bytes
+./iccTiffDump_unsafe input.tif output.icc
+./iccTiffDump_unsafe --summary input.tif output.icc
+./iccTiffDump_unsafe --evidence-json input.tif output.icc >evidence.json
+
+# Extract JPEG ICC chunks; recover malformed ordering for forensic analysis
+./iccJpegDump_unsafe --forensic input.jpg output.icc
+
+# Round-trip test
+./qa-roundtrip-colorbleed.sh
+
+# Strict sanitizer reproducer mode
+COLORBLEED_STRICT_SANITIZERS=1 ./iccFromXml_unsafe input.xml /tmp/out.icc
+```
+
+Do not pass `-sort` to `iccToJson_unsafe` in ColorBleed QA. The wrapper rejects
+that option with exit code 64 until the sorted JSON writer path is
+sanitizer-clean.
+
+## Integration with current upstream assessment
+
+Use ColorBleed for sandboxed mutation, round-trip, and byte-preserving container
+extraction. Use upstream `iccPawgReport` for the PAWG assessment and
+`iccdev-mcp` when an MCP or REST consumer needs the supported iccDEV operations.
+The retired `iccanalyzer-lite` integration is historical and must not be used as
+an active dependency.
+
+## Security Considerations
+
+- These tools process UNTRUSTED input - they are attack surface
+- Use release/debug builds for unsanitized behavior checks, and sanitizer builds
+  for finding attribution and regression gates.
+- Crashes in these tools indicate real vulnerabilities in iccDEV
+- Sanitizer builds suppress only known-benign STL/libstdc++ template noise in
+  `sanitizer-ignorelist.txt` and `silence.txt`. Keep iccDEV parser UB visible
+  unless an operation is proven intentional and well-defined.
+- Set `COLORBLEED_STRICT_SANITIZERS=1` when a reproducer must exit on the first
+  ASAN/UBSAN report. Strict sanitizer findings exit with code 86.
+- When a crash is found:
+  1. Minimize with `cfl/bin/icc_toxml_fuzzer -minimize_crash=1 <crash_file>`
+  2. Report to upstream: `github.com/InternationalColorConsortium/iccDEV/issues`
+  3. Create a CFL patch if the fix is straightforward
+
+## File Structure
+
+```
+colorbleed_tools/
+|-- Makefile           # Build system
+|-- build.sh           # Alternative build script
+|-- Readme.md          # Usage documentation
+|-- qa-roundtrip-colorbleed.sh # XML/JSON/TIFF/blob QA sweep
+|-- test-icctiffdump-unsafe.sh # Focused multi-config TIFF regression suite
+|-- test-iccjpegdump-unsafe.sh # Focused multi-config JPEG regression suite
+|-- generate-tiff-regression-fixtures.py # Temporary negative-fixture generator
+|-- generate-jpeg-icc-regression-fixtures.py # Temporary JPEG fixture generator
+|-- sanitizer-ignorelist.txt # Compile-time sanitizer ignorelist
+|-- silence.txt        # Runtime UBSAN suppressions for ad hoc reproductions
+|-- iccToXml_unsafe    # Binary: ICC -> XML converter (built, not committed)
+|-- iccFromXml_unsafe  # Binary: XML -> ICC converter (built, not committed)
+|-- iccToJson_unsafe   # Binary: ICC -> JSON converter (built, not committed)
+|-- iccFromJson_unsafe # Binary: JSON -> ICC converter (built, not committed)
+|-- iccTiffDump_unsafe # Binary: TIFF dump and ICC extractor (built, not committed)
+`-- iccJpegDump_unsafe # Binary: JPEG ICC extractor (built, not committed)
+```
+
+## Logging Convention
+
+These tools log warnings and errors to stderr:
+```
+WARNING: Tag 'desc' has unexpected type signature
+ERROR: Failed to read tag data at offset 0x1234
+```
+
+Stdout is reserved for status and structured dump messages. Converted XML,
+JSON, and extracted ICC bytes are written to the requested output path.
+For TIFF automation, use `--evidence-json`: stdout then contains exactly one
+`colorbleed-tiff-evidence/v1` object, while diagnostics remain on stderr. Do not
+parse the verbose directory dump. The extraction is atomically published before
+ICC parsing, and evidence separately records extraction, parse, tag-load,
+validation, libtiff, sanitizer, signal, and timeout state. See the exit table in
+`colorbleed_tools/Readme.md`; check strict sanitizer exit 86 before applying the
+generic 1-127 soft-failure rule.
+Exit 66 means an input path could not be resolved. For `make qa`, first verify
+that the tracked TIFF fixture above is present rather than treating 66 as a
+parser or libtiff failure.
+
+Upstream iccDEV `master` commit `3e348201` bounds recursive `ReadTags()` calls
+and preserves raw TIFF ICC bytes before parse and validation failures. The
+ColorBleed wrapper independently preserves the same forensic ordering. A nested
+profile may therefore be extracted successfully and then exit 5 when recursive
+tag loading is rejected; keep the artifact and treat the status as a soft parser
+failure, not a crash.
+
+Run `colorbleed_tools/test-icctiffdump-unsafe.sh` after TIFF source, sandbox,
+fixture generation, logging, evidence, or exit-contract changes. Generated
+negative fixtures and logs belong in its temporary evidence directory, not the
+repository.
+
+Run `colorbleed_tools/test-iccjpegdump-unsafe.sh` after JPEG source, fixture
+generation, chunk ordering, extraction, or exit-contract changes. Exit 10 is a
+successful forensic recovery with malformed ICC chunk metadata, not a crash.

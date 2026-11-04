@@ -1,0 +1,62 @@
+name: 'Setup Build Environment'
+description: 'Install build dependencies for ICC security research tools'
+inputs:
+  preset:
+    description: 'Package preset: analyzer, colorbleed, codeql, coverage, minimal'
+    required: false
+    default: 'analyzer'
+  extra-packages:
+    description: 'Additional apt packages (space-separated)'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      env:
+        BASH_ENV: /dev/null
+        DEBIAN_FRONTEND: noninteractive
+        PRESET: ${{ inputs.preset }}
+        EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+      run: |
+        set -euo pipefail
+        git config --global credential.helper ""
+        unset GITHUB_TOKEN || true
+
+        COMMON="build-essential cmake libxml2-dev libtiff-dev libpng-dev zlib1g-dev nlohmann-json3-dev"
+        CLANG_TOOLCHAIN="clang-18 clang-tools-18 clang-tidy-18 clang-format-18 llvm-18 llvm-18-tools"
+
+        case "${PRESET}" in
+          analyzer)
+            PACKAGES="${COMMON} ${CLANG_TOOLCHAIN} libjpeg-dev libssl-dev liblzma-dev"
+            ;;
+          cfl)
+            PACKAGES="${COMMON} ${CLANG_TOOLCHAIN} libjpeg-dev libssl-dev liblzma-dev"
+            ;;
+          colorbleed)
+            PACKAGES="${COMMON} gcc g++ ${CLANG_TOOLCHAIN} libjpeg-dev libssl-dev python3 python3-pip curl git"
+            ;;
+          codeql)
+            PACKAGES="${COMMON} ${CLANG_TOOLCHAIN} libjpeg-dev libssl-dev git ca-certificates"
+            ;;
+          coverage)
+            PACKAGES="${COMMON} ${CLANG_TOOLCHAIN} libjpeg-dev lcov"
+            ;;
+          minimal)
+            PACKAGES="${COMMON} clang-18 clang-tools-18 clang-tidy-18 clang-format-18 llvm-18-tools"
+            ;;
+          *)
+            echo "[FAIL] Unknown preset: ${PRESET}"
+            exit 1
+            ;;
+        esac
+
+        if [ -n "${EXTRA_PACKAGES}" ]; then
+          PACKAGES="${PACKAGES} ${EXTRA_PACKAGES}"
+        fi
+
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends ${PACKAGES}
+        echo "[OK] Installed packages for preset: ${PRESET}"
