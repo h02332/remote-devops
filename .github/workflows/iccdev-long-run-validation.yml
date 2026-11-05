@@ -76,14 +76,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [unix-x64, macos-x64, macos-arm64]
-        compiler: [gcc, clang]
-        build_type: [Release, Debug]
-        exclude:
+        include:
+          - os: unix-16core
+            compiler: gcc
+            build_type: Release
+          - os: unix-x64
+            compiler: gcc
+            build_type: Debug
+          - os: unix-16core
+            compiler: clang
+            build_type: Release
+          - os: unix-x64
+            compiler: clang
+            build_type: Debug
           - os: macos-x64
-            compiler: gcc
+            compiler: clang
+            build_type: Release
+          - os: macos-x64
+            compiler: clang
+            build_type: Debug
           - os: macos-arm64
-            compiler: gcc
+            compiler: clang
+            build_type: Release
+          - os: macos-arm64-vm2
+            compiler: clang
+            build_type: Debug
     defaults:
       run:
         shell: bash --noprofile --norc {0}
@@ -188,7 +205,7 @@ jobs:
           fi
           cmake -S iccDEV/Build/Cmake -B build -DCMAKE_BUILD_TYPE="$MATRIX_BUILD_TYPE" -DENABLE_TOOLS=ON -DENABLE_TESTS=ON -DENABLE_WXWIDGETS=OFF
           cmake --build build --parallel "$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)" --target all build-test-binaries
-          ctest_args=(--test-dir build --output-on-failure --no-tests=error)
+          ctest_args=(--test-dir build --parallel 4 --output-on-failure --no-tests=error)
           if [[ "$RUNNER_OS" == macOS ]]; then
             ctest_args+=(--label-exclude 'afl|clusterfuzzlite|libfuzzer')
           fi
@@ -197,7 +214,7 @@ jobs:
   gcc15-lto:
     name: GCC 15 Release LTO
     needs: resolve-target
-    runs-on: unix-x64
+    runs-on: unix-16core
     timeout-minutes: 45
     defaults:
       run:
@@ -375,7 +392,7 @@ jobs:
   docker:
     name: Docker regression verification
     needs: resolve-target
-    runs-on: unix-x64
+    runs-on: unix-16core
     timeout-minutes: 60
     defaults:
       run:
@@ -409,7 +426,7 @@ jobs:
   wasm:
     name: WASM release build
     needs: resolve-target
-    runs-on: unix-x64
+    runs-on: unix-16core
     timeout-minutes: 60
     defaults:
       run:
